@@ -715,6 +715,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "crc32fast",
+ "criterion",
  "flatbuffers",
  "generated_types",
  "influxdb_line_protocol",
