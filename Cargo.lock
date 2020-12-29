@@ -720,6 +720,7 @@ dependencies = [
  "generated_types",
  "influxdb_line_protocol",
  "serde",
+ "serde_json",
  "snafu",
  "tracing",
 ]

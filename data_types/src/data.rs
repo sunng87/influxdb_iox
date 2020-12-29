@@ -9,7 +9,7 @@ use influxdb_line_protocol::{FieldValue, ParsedLine};
 use std::{collections::BTreeMap, fmt};
 
 use chrono::Utc;
-use crc32fast::Hasher;
+// use crc32fast::Hasher;
 use flatbuffers::FlatBufferBuilder;
 
 pub fn type_description(value: wb::ColumnValue) -> &'static str {
@@ -172,9 +172,10 @@ pub fn lines_to_replicated_write(
         lines,
     );
 
-    let mut hasher = Hasher::new();
-    hasher.update(&entry_bytes);
-    let checksum = hasher.finalize();
+    // let mut hasher = Hasher::new();
+    // hasher.update(&entry_bytes);
+    // let checksum = hasher.finalize();
+    let checksum = 0u32;
 
     let mut fbb = flatbuffers::FlatBufferBuilder::new_with_capacity(1024);
     let payload = fbb.create_vector_direct(&entry_bytes);
