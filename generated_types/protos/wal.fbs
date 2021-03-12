@@ -1,18 +1,5 @@
 namespace wal;
 
-table Entry {
-  entry_type: EntryType;
-}
-
-table EntryType {
-  write: Write;
-  delete: Delete;
-}
-
-table Write {
-  points: [Point];
-}
-
 table I64Value {
   value: int64;
 }
@@ -31,20 +18,6 @@ table BoolValue {
 
 table StringValue {
   value: string;
-}
-
-union PointValue {
-  I64Value,
-  U64Value,
-  F64Value,
-  BoolValue,
-  StringValue
-}
-
-table Point {
-  key: string;
-  time: int64;
-  value: PointValue;
 }
 
 table Delete {
@@ -70,15 +43,6 @@ table ReplicatedWriteData {
   payload: [ubyte];
 }
 
-// WriterSummary contains the inormation for a writer that has writes in a Segment
-table WriterSummary {
-  writer_id: uint64;
-  start_sequence: uint64;
-  end_sequence: uint64;
-  // if true, there are sequence numbers between start and end that were missing
-  missing_sequences: bool;
-}
-
 // ReplicatedWrite is what gets sent between InfluxDB IOx servers and potentially
 // persisted up to object storage from the servers that receive it. The combination
 // of the writer, timestamp and checksum in this table can be used to deduplicate
@@ -101,7 +65,6 @@ table WriteBufferBatch {
 table WriteBufferEntry {
   partition_key: string;
   table_batches: [TableWriteBatch];
-  delete: WriteBufferDelete;
 }
 
 enum ColumnType : byte { I64, U64, F64, Tag, String, Bool }
@@ -131,9 +94,4 @@ union ColumnValue {
 table Value {
   column: string;
   value: ColumnValue;
-}
-
-table WriteBufferDelete {
-  table_name: string;
-  predicate: string;
 }
