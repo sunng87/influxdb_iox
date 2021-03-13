@@ -14,12 +14,23 @@ namespace wal;
 // layer generate the partition keys while it's at the job of parsing and validating
 // the line protocol. This will save the downstream stateful layers from doing
 // extra work.
+//
+// Even though this entry type has multiple fields (writes, deletes, others), they
+// are mutually exclusive. That is an Entry will only ever have one of those fields.
+// So you won't have an entry that has writes and deletes.
 table Entry {
+  // A collection of partition writes. A given partition will have at most one
+  // write in this collection.
   writes: [PartitionWrite];
+  // A collection of deletes. Each delete targets a single table, with each table
+  // having no more than one delete. Deletes can span partitions because they
+  // only have a predicate and do not target any specific partition.
   deletes: [Delete];
 }
 
-// A delete from a single table with a predicate.
+// A delete from a single table with a predicate. Deletes can span partitions since
+// they're concerned with data that has already been written. Partitioning is a way
+// to split up writes as they land.
 table Delete {
   table_name: string;
   predicate: string;
