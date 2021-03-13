@@ -102,5 +102,6 @@ table Segment {
 // be used to order the entries from a WAL server.
 table SequencedEntry {
   sequence_number: uint64;
+  writer_id: uint32;
   entry_data: [ubyte];
 }
