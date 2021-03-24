@@ -32,7 +32,6 @@ fn generate_grpc_types(root: &Path) -> Result<()> {
         storage_path.join("service.proto"),
         storage_path.join("storage_common_idpe.proto"),
         idpe_path.join("source.proto"),
-        management_path.join("base_types.proto"),
         management_path.join("database_rules.proto"),
         management_path.join("chunk.proto"),
         management_path.join("partition.proto"),

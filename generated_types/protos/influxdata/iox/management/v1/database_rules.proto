@@ -3,7 +3,6 @@ package influxdata.iox.management.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
-import "influxdata/iox/management/v1/base_types.proto";
 
 // `PartitionTemplate` is used to compute the partition key of each row that
 // gets written. It can consist of the table name, a column name and its value,
@@ -84,60 +83,24 @@ message WalBufferConfig {
 }
 
 message MutableBufferConfig {
-  message PartitionDropOrder {
-    message ColumnSort {
-      string column_name = 1;
-      ColumnType column_type = 2;
-      Aggregate column_value = 3;
-    }
+  // A chunk with more than this number of bytes should be transitioned from open -> closing
+  uint64 open_chunk_size = 1;
 
-    // Sort partitions by this order. Last will be dropped first.
-    Order order = 1;
+  // A chunk that hasn't received a write for this number of milliseconds should be transitioned
+  // from open -> closing
+  uint32 open_chunk_linger_ms = 2;
 
-    // Configure sort key
-    oneof sort {
-      // The last time the partition received a write.
-      google.protobuf.Empty last_write_time = 2;
+  // A `closing` chunk that hasn't received a write for this number of milliseconds should be
+  // transitioned from closing -> closed
+  uint32 closing_chunk_linger_ms = 3;
 
-      // When the partition was opened in the mutable buffer.
-      google.protobuf.Empty created_at_time = 3;
+  // A soft limit for the size the mutable buffer should be limited to. Once the buffer
+  // exceeds this size IOx should start closing and transitioning chunks to the read buffer
+  uint64 buffer_size_soft = 4;
 
-      // A column name, its expected type, and whether to use the min or max
-      // value. The ColumnType is necessary because the column can appear in
-      // any number of tables and be of a different type. This specifies that
-      // when sorting partitions, only columns with the given name and type
-      // should be used for the purposes of determining the partition order. If a
-      // partition doesn't have the given column in any way, the partition will
-      // appear at the beginning of the list with a null value where all
-      // partitions having null for that value will then be
-      // sorted by created_at_time desc. So if none of the partitions in the
-      // mutable buffer had this column with this type, then the partition
-      // that was created first would appear last in the list and thus be the
-      // first up to be dropped.
-      ColumnSort column = 4;
-    }
-  }
-  // The size the mutable buffer should be limited to. Once the buffer gets
-  // to this size it will drop partitions in the given order. If unable
-  // to drop partitions (because of later rules in this config) it will
-  // reject writes until it is able to drop partitions.
-  uint64 buffer_size = 1;
-
-  // If set, the mutable buffer will not drop partitions that have chunks
-  // that have not yet been persisted. Thus it will reject writes if it
-  // is over size and is unable to drop partitions. The default is to
-  // drop partitions in the sort order, regardless of whether they have
-  // unpersisted chunks or not. The WAL Buffer can be used to ensure
-  // persistence, but this may cause longer recovery times.
-  bool reject_if_not_persisted = 2;
-
-  // Configure order to drop partitions in
-  PartitionDropOrder partition_drop_order = 3;
-
-  // Attempt to persist partitions after they haven't received a write for
-  // this number of seconds. If not set, partitions won't be
-  // automatically persisted.
-  uint32 persist_after_cold_seconds = 4;
+  // A hard limit on the size of the mutable buffer. Once the buffer exceeds this size
+  // it should start rejecting writes
+  uint64 buffer_size_hard = 5;
 }
 
 message DatabaseRules {

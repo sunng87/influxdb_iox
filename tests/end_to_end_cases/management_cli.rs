@@ -88,7 +88,6 @@ async fn test_create_database() {
                 .and(predicate::str::contains(format!("name: \"{}\"", db)))
                 // validate the defaults have been set reasonably
                 .and(predicate::str::contains("%Y-%m-%d %H:00:00"))
-                .and(predicate::str::contains("buffer_size: 104857600"))
                 .and(predicate::str::contains("MutableBufferConfig")),
         );
 }
@@ -123,7 +122,7 @@ async fn test_create_database_size() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("buffer_size: 1000")
+            predicate::str::contains("buffer_size_hard: 1000")
                 .and(predicate::str::contains("MutableBufferConfig")),
         );
 }

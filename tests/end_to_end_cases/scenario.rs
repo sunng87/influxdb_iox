@@ -271,10 +271,7 @@ pub async fn create_readable_database(
                 part: Some(partition_template::part::Part::Table(Empty {})),
             }],
         }),
-        mutable_buffer_config: Some(MutableBufferConfig {
-            buffer_size: 10 * 1024 * 1024,
-            ..Default::default()
-        }),
+        mutable_buffer_config: Some(Default::default()),
         ..Default::default()
     };
 

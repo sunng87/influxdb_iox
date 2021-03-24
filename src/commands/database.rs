@@ -67,7 +67,8 @@ struct Create {
     /// The name of the database
     name: String,
 
-    /// Create a mutable buffer of the specified size in bytes.  If
+    // TODO: Add more mutable buffer configuration including no hard limit
+    /// Create a mutable buffer with the specified hard size limit in bytes.  If
     /// size is 0, no mutable buffer is created.
     #[structopt(short, long, default_value = "104857600")] // 104857600 = 100*1024*1024
     mutable_buffer: u64,
@@ -131,7 +132,7 @@ pub async fn command(url: String, config: Config) -> Result<()> {
             let buffer_size = command.mutable_buffer;
             let mutable_buffer_config = if buffer_size > 0 {
                 Some(MutableBufferConfig {
-                    buffer_size,
+                    buffer_size_hard: buffer_size,
                     ..Default::default()
                 })
             } else {

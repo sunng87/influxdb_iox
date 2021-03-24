@@ -1,4 +1,3 @@
-use data_types::database_rules::{PartitionSort, PartitionSortRules};
 use generated_types::wal;
 use internal_types::data::ReplicatedWrite;
 
@@ -7,7 +6,6 @@ use crate::{chunk::Chunk, partition::Partition};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use data_types::database_rules::Order;
 use snafu::{ResultExt, Snafu};
 use std::sync::RwLock;
 
@@ -154,35 +152,6 @@ impl MutableBufferDb {
         size
     }
 
-    /// Returns the partitions in the requested sort order
-    pub fn partitions_sorted_by(
-        &self,
-        sort_rules: &PartitionSortRules,
-    ) -> Vec<Arc<RwLock<Partition>>> {
-        let mut partitions: Vec<_> = {
-            let partitions = self.partitions.read().expect("poisoned mutex");
-            partitions.values().map(Arc::clone).collect()
-        };
-
-        match &sort_rules.sort {
-            PartitionSort::CreatedAtTime => {
-                partitions.sort_by_cached_key(|p| p.read().expect("mutex poisoned").created_at);
-            }
-            PartitionSort::LastWriteTime => {
-                partitions.sort_by_cached_key(|p| p.read().expect("mutex poisoned").last_write_at);
-            }
-            PartitionSort::Column(_name, _data_type, _val) => {
-                unimplemented!()
-            }
-        }
-
-        if sort_rules.order == Order::Desc {
-            partitions.reverse();
-        }
-
-        partitions
-    }
-
     pub async fn store_replicated_write(&self, write: &ReplicatedWrite) -> Result<()> {
         match write.write_buffer_batch() {
             Some(b) => self.write_entries_to_partitions(&b)?,
@@ -247,7 +216,7 @@ impl MutableBufferDb {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use data_types::database_rules::{Order, Partitioner};
+    use data_types::database_rules::Partitioner;
     use internal_types::{data::lines_to_replicated_write, selection::Selection};
 
     use arrow_deps::arrow::array::{Array, StringArray};
@@ -329,31 +298,6 @@ mod tests {
         write_lp(&db, &lines).await;
 
         assert_eq!(429, db.size());
-    }
-
-    #[tokio::test]
-    async fn partitions_sorted_by_times() {
-        let db = MutableBufferDb::new("foo");
-        write_lines_to_partition(&db, &["cpu val=1 2"], "p1").await;
-        write_lines_to_partition(&db, &["mem val=2 1"], "p2").await;
-        write_lines_to_partition(&db, &["cpu val=1 2"], "p1").await;
-        write_lines_to_partition(&db, &["mem val=2 1"], "p2").await;
-
-        let sort_rules = PartitionSortRules {
-            order: Order::Desc,
-            sort: PartitionSort::LastWriteTime,
-        };
-        let partitions = db.partitions_sorted_by(&sort_rules);
-        assert_eq!(partitions[0].read().unwrap().key(), "p2");
-        assert_eq!(partitions[1].read().unwrap().key(), "p1");
-
-        let sort_rules = PartitionSortRules {
-            order: Order::Asc,
-            sort: PartitionSort::CreatedAtTime,
-        };
-        let partitions = db.partitions_sorted_by(&sort_rules);
-        assert_eq!(partitions[0].read().unwrap().key(), "p1");
-        assert_eq!(partitions[1].read().unwrap().key(), "p2");
     }
 
     /// write lines into this database

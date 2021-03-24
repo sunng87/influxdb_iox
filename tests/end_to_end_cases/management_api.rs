@@ -186,15 +186,11 @@ async fn test_create_get_database() {
             }),
         }),
         mutable_buffer_config: Some(MutableBufferConfig {
-            buffer_size: 553,
-            reject_if_not_persisted: true,
-            partition_drop_order: Some(mutable_buffer_config::PartitionDropOrder {
-                order: Order::Asc as _,
-                sort: Some(
-                    mutable_buffer_config::partition_drop_order::Sort::CreatedAtTime(Empty {}),
-                ),
-            }),
-            persist_after_cold_seconds: 34,
+            open_chunk_size: 2342,
+            open_chunk_linger_ms: 345,
+            closing_chunk_linger_ms: 343,
+            buffer_size_soft: 12,
+            buffer_size_hard: 4545,
         }),
     };
 
