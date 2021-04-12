@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::selection::Selection;
 use arrow_deps::arrow::datatypes::{
     DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
     SchemaRef as ArrowSchemaRef,
@@ -467,6 +468,43 @@ impl Schema {
 
             Self {
                 inner: Arc::new(new_schema),
+            }
+        }
+    }
+
+    /// Returns the schema for a selection of columns from this schema
+    ///
+    /// Any columns in the selection but not in the schema will be ignored
+    pub fn select(&self, selection: Selection<'_>) -> Self {
+        match selection {
+            Selection::All => self.clone(),
+            Selection::Some(columns) => {
+                let fields = self
+                    .inner
+                    .fields()
+                    .iter()
+                    .filter(|x| columns.contains(&x.name().as_str()))
+                    .cloned()
+                    .collect();
+
+                let metadata = self
+                    .inner
+                    .metadata()
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        if name.as_str() == MEASUREMENT_METADATA_KEY
+                            || columns.contains(&name.as_str())
+                        {
+                            Some((name.clone(), value.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                Self {
+                    inner: Arc::new(ArrowSchema::new_with_metadata(fields, metadata)),
+                }
             }
         }
     }
@@ -1178,6 +1216,67 @@ mod test {
             expected_schema, sorted_schema,
             "\nExpected:\n{:#?}\nActual:\n{:#?}",
             expected_schema, sorted_schema
+        );
+    }
+
+    #[test]
+    fn test_select() {
+        let schema1 = SchemaBuilder::new()
+            .influx_field("the_field", String)
+            .tag("the_tag")
+            .timestamp()
+            .measurement("the_measurement")
+            .build()
+            .unwrap();
+
+        let schema2 = schema1.select(Selection::All);
+        let schema3 = schema1.select(Selection::Some(&[TIME_COLUMN_NAME]));
+        let schema4 = Schema::try_from_arrow(schema3.clone().into()).unwrap();
+
+        assert_eq!(schema1.measurement(), schema2.measurement());
+        assert_eq!(schema1.measurement(), schema3.measurement());
+        assert_eq!(schema1.measurement(), schema4.measurement());
+
+        assert_eq!(schema1.len(), 3);
+        assert_eq!(schema2.len(), 3);
+        assert_eq!(schema3.len(), 1);
+        assert_eq!(schema4.len(), 1);
+
+        assert_eq!(schema1.inner.fields().len(), 3);
+        assert_eq!(schema2.inner.fields().len(), 3);
+        assert_eq!(schema3.inner.fields().len(), 1);
+        assert_eq!(schema4.inner.fields().len(), 1);
+
+        let get_type = |x: &Schema, field: &str| -> InfluxColumnType {
+            let idx = x.find_index_of(field).unwrap();
+            x.field(idx).0.unwrap()
+        };
+
+        assert_eq!(
+            get_type(&schema1, TIME_COLUMN_NAME),
+            InfluxColumnType::Timestamp
+        );
+        assert_eq!(
+            get_type(&schema2, TIME_COLUMN_NAME),
+            InfluxColumnType::Timestamp
+        );
+        assert_eq!(get_type(&schema1, "the_tag"), InfluxColumnType::Tag);
+        assert_eq!(get_type(&schema2, "the_tag"), InfluxColumnType::Tag);
+        assert_eq!(
+            get_type(&schema1, "the_field"),
+            InfluxColumnType::Field(InfluxFieldType::String)
+        );
+        assert_eq!(
+            get_type(&schema2, "the_field"),
+            InfluxColumnType::Field(InfluxFieldType::String)
+        );
+        assert_eq!(
+            get_type(&schema3, TIME_COLUMN_NAME),
+            InfluxColumnType::Timestamp
+        );
+        assert_eq!(
+            get_type(&schema4, TIME_COLUMN_NAME),
+            InfluxColumnType::Timestamp
         );
     }
 }
