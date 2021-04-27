@@ -153,7 +153,10 @@ trait ChunkMover {
                     Some(chunk) => {
                         let chunk_guard = chunk.read();
                         if (rules.drop_non_persisted
-                            && matches!(chunk_guard.state(), ChunkState::Moved(_)))
+                            && matches!(
+                                chunk_guard.state(),
+                                ChunkState::Moved(_) | ChunkState::Closing(_)
+                            ))
                             || matches!(chunk_guard.state(), ChunkState::WrittenToObjectStore(_, _))
                         {
                             let partition_key = chunk_guard.key().to_string();
