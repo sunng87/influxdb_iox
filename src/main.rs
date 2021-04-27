@@ -150,6 +150,7 @@ enum Command {
 }
 
 fn main() -> Result<(), std::io::Error> {
+    eprintln!("build test 1");
     // load all environment variables from .env before doing anything
     load_dotenv();
 
