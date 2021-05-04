@@ -491,8 +491,6 @@ impl Db {
                     chunk_state,
                 }
             );
-
-            self.metrics.update_chunk_state(chunk.state());
         };
 
         debug!(%partition_key, %table_name, %chunk_id, %chunk_state, "dropping chunk");
