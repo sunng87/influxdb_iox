@@ -4,7 +4,7 @@ use arrow_deps::arrow::{
     array::{ArrayRef, StringArray},
     record_batch::RecordBatch,
 };
-use observability_deps::tracing::{debug, info};
+use observability_exporters::tracing::{debug, info};
 use rustyline::{error::ReadlineError, Editor};
 use snafu::{ResultExt, Snafu};
 

@@ -17,7 +17,7 @@ use arrow_deps::{
     },
 };
 
-use observability_deps::tracing::{debug, info};
+use observability_exporters::tracing::{debug, info};
 
 #[derive(Debug, Snafu)]
 pub enum Error {

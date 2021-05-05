@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use generated_types::{google::FieldViolation, influxdata::iox::write::v1::*};
 use influxdb_line_protocol::parse_lines;
-use observability_deps::tracing::debug;
+use observability_exporters::tracing::debug;
 use server::{ConnectionManager, Server};
 use std::fmt::Debug;
 use tonic::Response;

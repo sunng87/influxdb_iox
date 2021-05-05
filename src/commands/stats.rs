@@ -1,6 +1,6 @@
 //! This module contains code to report compression statistics for storage files
 
-use observability_deps::tracing::info;
+use observability_exporters::tracing::info;
 use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
 

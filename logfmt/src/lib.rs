@@ -1,6 +1,6 @@
 #![deny(broken_intra_doc_links, rust_2018_idioms)]
 
-use observability_deps::{
+use observability_exporters::{
     tracing::{
         self,
         field::{Field, Visit},

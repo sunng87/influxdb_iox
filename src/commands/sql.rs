@@ -1,6 +1,6 @@
 //! Entrypoint for interactive SQL repl loop
 
-use observability_deps::tracing::debug;
+use observability_exporters::tracing::debug;
 use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
 

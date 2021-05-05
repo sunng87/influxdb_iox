@@ -1488,7 +1488,7 @@ dependencies = [
  "metrics",
  "mutable_buffer",
  "object_store",
- "observability_deps",
+ "observability_exporters",
  "once_cell",
  "packers",
  "panic_logging",
@@ -1745,7 +1745,7 @@ dependencies = [
 name = "logfmt"
 version = "0.1.0"
 dependencies = [
- "observability_deps",
+ "observability_exporters",
  "once_cell",
  "parking_lot",
  "regex",
@@ -2154,13 +2154,20 @@ dependencies = [
 name = "observability_deps"
 version = "0.1.0"
 dependencies = [
- "env_logger",
  "opentelemetry",
- "opentelemetry-jaeger",
- "opentelemetry-otlp",
  "opentelemetry-prometheus",
  "prometheus",
  "tracing",
+]
+
+[[package]]
+name = "observability_exporters"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "observability_deps",
+ "opentelemetry-jaeger",
+ "opentelemetry-otlp",
  "tracing-opentelemetry",
  "tracing-subscriber",
 ]
@@ -4134,9 +4141,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
-version = "0.2.17"
+version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "705096c6f83bf68ea5d357a6aa01829ddbdac531b357b45abeca842938085baa"
+checksum = "aa5553bf0883ba7c9cbe493b085c29926bd41b66afc31ff72cf17ff4fb60dcd5"
 dependencies = [
  "ansi_term 0.12.1",
  "chrono",

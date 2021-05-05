@@ -19,7 +19,7 @@ use generated_types::{
 };
 
 use super::{TAG_KEY_FIELD, TAG_KEY_MEASUREMENT};
-use observability_deps::tracing::warn;
+use observability_exporters::tracing::warn;
 use query::group_by::{Aggregate as QueryAggregate, WindowDuration};
 use query::predicate::PredicateBuilder;
 use snafu::{ResultExt, Snafu};

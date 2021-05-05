@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use observability_deps::tracing::{debug, warn};
+use observability_exporters::tracing::{debug, warn};
 
 /// Represents the parsed command from the user (which may be over many lines)
 #[derive(Debug, PartialEq)]

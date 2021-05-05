@@ -4,7 +4,7 @@ use ingest::{
     ConversionSettings, Error as IngestError, LineProtocolConverter, TsmFileConverter,
 };
 use internal_types::schema::Schema;
-use observability_deps::tracing::{debug, info, warn};
+use observability_exporters::tracing::{debug, info, warn};
 use packers::{Error as TableError, IOxTableWriter, IOxTableWriterSource};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::{

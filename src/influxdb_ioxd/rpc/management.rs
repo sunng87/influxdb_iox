@@ -10,7 +10,7 @@ use generated_types::google::{
     AlreadyExists, FieldViolation, FieldViolationExt, InternalError, NotFound,
 };
 use generated_types::influxdata::iox::management::v1::*;
-use observability_deps::tracing::info;
+use observability_exporters::tracing::info;
 use query::{Database, DatabaseStore};
 use server::{ConnectionManager, Error, Server};
 use tonic::{Request, Response, Status};

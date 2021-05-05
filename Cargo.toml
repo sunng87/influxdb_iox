@@ -23,6 +23,7 @@ members = [
     "mutable_buffer",
     "object_store",
     "observability_deps",
+    "observability_exporters",
     "packers",
     "panic_logging",
     "query",
@@ -54,7 +55,7 @@ mem_qe = { path = "mem_qe" }
 metrics = { path = "metrics" }
 mutable_buffer = { path = "mutable_buffer" }
 object_store = { path = "object_store" }
-observability_deps = { path = "observability_deps" }
+observability_exporters = { path = "observability_exporters" }
 packers = { path = "packers" }
 panic_logging = { path = "panic_logging" }
 query = { path = "query" }

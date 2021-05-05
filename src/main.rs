@@ -15,10 +15,10 @@ use tokio::runtime::Runtime;
 
 use commands::tracing::{init_logs_and_tracing, init_simple_logs};
 use ingest::parquet::writer::CompressionLevel;
-use observability_deps::tracing::{debug, warn};
+use observability_exporters::tracing::{debug, warn};
 
 use crate::commands::tracing::TracingGuard;
-use observability_deps::tracing::dispatcher::SetGlobalDefaultError;
+use observability_exporters::tracing::dispatcher::SetGlobalDefaultError;
 use tikv_jemallocator::Jemalloc;
 
 mod commands {

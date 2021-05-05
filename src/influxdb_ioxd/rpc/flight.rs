@@ -2,7 +2,7 @@
 use std::{pin::Pin, sync::Arc};
 
 use futures::Stream;
-use observability_deps::tracing::error;
+use observability_exporters::tracing::error;
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt, Snafu};
 use tonic::{Request, Response, Streaming};

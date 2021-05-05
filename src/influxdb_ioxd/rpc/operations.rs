@@ -2,7 +2,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use observability_deps::tracing::debug;
+use observability_exporters::tracing::debug;
 use prost::Message;
 use tonic::Response;
 

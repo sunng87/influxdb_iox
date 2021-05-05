@@ -1,6 +1,6 @@
 use influxdb_tsm::{reader::IndexEntry, reader::TsmIndexReader, InfluxId, TsmError};
 use ingest::parquet::metadata::print_parquet_metadata;
-use observability_deps::tracing::{debug, info};
+use observability_exporters::tracing::{debug, info};
 use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, BTreeSet},

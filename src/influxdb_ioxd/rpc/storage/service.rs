@@ -24,7 +24,7 @@ use generated_types::{
     TimestampRange,
 };
 use metrics::KeyValue;
-use observability_deps::tracing::{error, info};
+use observability_exporters::tracing::{error, info};
 use query::{
     exec::fieldlist::FieldList, exec::seriesset::Error as SeriesSetError,
     predicate::PredicateBuilder, DatabaseStore,

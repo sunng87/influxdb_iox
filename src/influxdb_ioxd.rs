@@ -4,7 +4,7 @@ use hyper::server::conn::AddrIncoming;
 use object_store::{
     self, aws::AmazonS3, azure::MicrosoftAzure, gcp::GoogleCloudStorage, ObjectStore,
 };
-use observability_deps::tracing::{self, error, info, warn, Instrument};
+use observability_exporters::tracing::{self, error, info, warn, Instrument};
 use panic_logging::SendPanicsToTracing;
 use server::{
     ConnectionManagerImpl as ConnectionManager, Server as AppServer,

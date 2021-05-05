@@ -27,7 +27,7 @@ use bytes::{Bytes, BytesMut};
 use futures::{self, StreamExt};
 use http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use hyper::{Body, Method, Request, Response, StatusCode};
-use observability_deps::{
+use observability_exporters::{
     opentelemetry::KeyValue,
     tracing::{self, debug, error},
 };
@@ -431,7 +431,7 @@ async fn parse_body(req: hyper::Request<Body>) -> Result<Bytes, ApplicationError
     }
 }
 
-#[observability_deps::instrument(level = "debug")]
+#[observability_exporters::instrument(level = "debug")]
 async fn write<M>(req: Request<Body>) -> Result<Response<Body>, ApplicationError>
 where
     M: ConnectionManager + Send + Sync + Debug + 'static,

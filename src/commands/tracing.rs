@@ -1,7 +1,7 @@
 //! Log and trace initialization and setup
 
-use observability_deps::tracing::dispatcher::SetGlobalDefaultError;
-use observability_deps::{
+use observability_exporters::tracing::dispatcher::SetGlobalDefaultError;
+use observability_exporters::{
     opentelemetry,
     opentelemetry::sdk::trace,
     opentelemetry::sdk::Resource,
