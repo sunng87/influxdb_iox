@@ -14,7 +14,7 @@ edition = "2018"
 
 
 [dependencies] # In alphabetical order
-observability_deps = { path = "../observability_deps" }
+observability_deps = { path = "../observability_deps", features = ["exporters"] }
 snafu = "0.6"
 dashmap = { version = "4.0.1" }
 
