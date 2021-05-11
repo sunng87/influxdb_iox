@@ -10,3 +10,4 @@ pub mod arrow;
 pub mod once;
 pub mod schema;
 pub mod selection;
+pub mod write;
