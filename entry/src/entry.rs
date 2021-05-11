@@ -897,11 +897,7 @@ pub mod test_helpers {
     }
 
     /// Sequences a given entry
-    pub fn sequence_entry(
-        server_id: u32,
-        clock_value: u64,
-        entry: &Entry
-    ) -> OwnedSequencedEntry {
+    pub fn sequence_entry(server_id: u32, clock_value: u64, entry: &Entry) -> OwnedSequencedEntry {
         let server_id = ServerId::try_from(server_id).unwrap();
         let clock_value = ClockValue::try_from(clock_value).unwrap();
 

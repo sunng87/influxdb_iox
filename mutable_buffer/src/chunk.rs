@@ -1,12 +1,12 @@
-use std::{collections::BTreeSet, convert::TryFrom, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
 use parking_lot::Mutex;
 use snafu::{ResultExt, Snafu};
 
 use arrow::record_batch::RecordBatch;
-use data_types::{partition_metadata::TableSummary, server_id::ServerId};
-use entry::{ClockValue, TableBatch};
+use data_types::partition_metadata::TableSummary;
 use internal_types::selection::Selection;
+use internal_types::write::TableWrite;
 use tracker::{MemRegistry, MemTracker};
 
 use crate::chunk::snapshot::ChunkSnapshot;
@@ -17,11 +17,8 @@ pub mod snapshot;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("Error writing table '{}': {}", table_name, source))]
-    TableWrite {
-        table_name: String,
-        source: crate::table::Error,
-    },
+    #[snafu(display("Error writing table: {}", source))]
+    TableWriteError { source: crate::table::Error },
 
     #[snafu(display("Table Error in '{}': {}", table_name, source))]
     NamedTableError {
@@ -92,26 +89,10 @@ impl Chunk {
         chunk
     }
 
-    /// Write the contents of a [`TableBatch`] into this Chunk.
-    ///
-    /// Panics if the batch specifies a different name for the table in this Chunk
-    pub fn write_table_batch(
-        &mut self,
-        clock_value: ClockValue,
-        server_id: ServerId,
-        batch: TableBatch<'_>,
-    ) -> Result<()> {
-        let table_name = batch.name();
-        assert_eq!(
-            table_name,
-            self.table_name.as_ref(),
-            "can only insert table batch for a single table to chunk"
-        );
-
-        let columns = batch.columns();
+    pub fn write_table_batch(&mut self, write: &TableWrite<'_>) -> Result<()> {
         self.table
-            .write_columns(&mut self.dictionary, clock_value, server_id, columns)
-            .context(TableWrite { table_name })?;
+            .append(&mut self.dictionary, write)
+            .context(TableWriteError {})?;
 
         // Invalidate chunk snapshot
         *self
@@ -222,38 +203,16 @@ impl Chunk {
 }
 
 pub mod test_helpers {
-    use entry::test_helpers::lp_to_entry;
-
     use super::*;
+    use internal_types::write::line_protocol::lp_to_table_writes;
 
     /// A helper that will write line protocol string to the passed in Chunk.
     /// All data will be under a single partition with a clock value and
     /// server id of 1.
     pub fn write_lp_to_chunk(lp: &str, chunk: &mut Chunk) -> Result<()> {
-        let entry = lp_to_entry(lp);
-
-        for w in entry.partition_writes().unwrap() {
-            let table_batches = w.table_batches();
-            // ensure they are all to the same table
-            let table_names: BTreeSet<String> =
-                table_batches.iter().map(|b| b.name().to_string()).collect();
-
-            assert!(
-                table_names.len() <= 1,
-                "Can only write 0 or one tables to chunk. Found {:?}",
-                table_names
-            );
-
-            for batch in table_batches {
-                chunk.write_table_batch(
-                    ClockValue::try_from(5).unwrap(),
-                    ServerId::try_from(1).unwrap(),
-                    batch,
-                )?;
-            }
-        }
-
-        Ok(())
+        let writes = lp_to_table_writes(lp, &Default::default()).unwrap();
+        assert_eq!(writes.len(), 1);
+        chunk.write_table_batch(&writes.into_iter().next().unwrap().1)
     }
 }
 

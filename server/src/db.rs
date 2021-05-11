@@ -1193,16 +1193,12 @@ impl Db {
                             let mb_chunk =
                                 chunk.mutable_buffer().expect("cannot mutate open chunk");
 
-                            mb_chunk
-                                .write_table_batch(
-                                    sequenced_entry.clock_value(),
-                                    sequenced_entry.server_id(),
-                                    table_batch,
-                                )
-                                .context(WriteEntry {
+                            mb_chunk.write_table_batch(&table_batch.into()).context(
+                                WriteEntry {
                                     partition_key,
                                     chunk_id,
-                                })?;
+                                },
+                            )?;
 
                             // set new size of chunk
                             self.metrics.catalog_chunk_bytes.set_with_labels(
@@ -1219,8 +1215,6 @@ impl Db {
                             let new_chunk = partition
                                 .create_open_chunk(
                                     table_batch,
-                                    sequenced_entry.clock_value(),
-                                    sequenced_entry.server_id(),
                                     self.memory_registries.mutable_buffer.as_ref(),
                                 )
                                 .context(OpenEntry { partition_key })?;

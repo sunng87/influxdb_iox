@@ -7,11 +7,11 @@ use super::{
     Result, UnknownChunk, UnknownTable,
 };
 use chrono::{DateTime, Utc};
+use data_types::chunk::ChunkSummary;
 use data_types::partition_metadata::{
     PartitionSummary, UnaggregatedPartitionSummary, UnaggregatedTableSummary,
 };
-use data_types::{chunk::ChunkSummary, server_id::ServerId};
-use entry::{ClockValue, TableBatch};
+use entry::TableBatch;
 use query::predicate::Predicate;
 use snafu::OptionExt;
 use tracker::{LockTracker, MemRegistry, RwLock};
@@ -86,8 +86,6 @@ impl Partition {
     pub fn create_open_chunk(
         &mut self,
         batch: TableBatch<'_>,
-        clock_value: ClockValue,
-        server_id: ServerId,
         memory_registry: &MemRegistry,
     ) -> Result<Arc<RwLock<Chunk>>> {
         let table_name: String = batch.name().into();
@@ -100,11 +98,10 @@ impl Partition {
         table.next_chunk_id += 1;
 
         let chunk = Arc::new(self.lock_tracker.new_lock(Chunk::new_open(
-            batch,
+            batch.name(),
+            &batch.into(),
             &self.key,
             chunk_id,
-            clock_value,
-            server_id,
             memory_registry,
         )?));
 

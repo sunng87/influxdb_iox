@@ -10,13 +10,14 @@ use arrow::{
     },
     datatypes::{DataType, Int32Type},
 };
-use arrow_util::bitset::{iter_set_positions, BitSet};
+use arrow_util::bitset::{iter_bits, iter_set_positions, BitSet};
 use arrow_util::string::PackedStringArray;
 use data_types::partition_metadata::{IsNan, StatValues, Statistics};
-use entry::Column as EntryColumn;
 use internal_types::schema::{InfluxColumnType, InfluxFieldType, TIME_DATA_TYPE};
 
 use crate::dictionary::{Dictionary, DID, INVALID_DID};
+use internal_types::write::{ColumnWrite, ColumnWriteValues};
+use itertools::Either;
 
 #[derive(Debug, Snafu)]
 #[allow(missing_copy_implementations)]
@@ -94,14 +95,12 @@ impl Column {
         }
     }
 
-    pub fn validate_schema(&self, entry: &EntryColumn<'_>) -> Result<()> {
-        let entry_type = entry.influx_type();
-
+    pub fn validate_schema(&self, influx_type: InfluxColumnType) -> Result<()> {
         ensure!(
-            entry_type == self.influx_type,
+            influx_type == self.influx_type,
             TypeMismatch {
                 existing: self.influx_type,
-                inserted: entry_type
+                inserted: influx_type
             }
         );
 
@@ -112,121 +111,99 @@ impl Column {
         self.influx_type
     }
 
-    pub fn append(&mut self, entry: &EntryColumn<'_>, dictionary: &mut Dictionary) -> Result<()> {
-        self.validate_schema(entry)?;
+    pub fn append(&mut self, write: &ColumnWrite<'_>, dictionary: &mut Dictionary) -> Result<()> {
+        self.validate_schema(write.influx_type)?;
 
-        let row_count = entry.row_count;
+        let row_count = write.row_count;
         if row_count == 0 {
             return Ok(());
         }
-
-        let mask = construct_valid_mask(entry)?;
+        let mask = write.valid_mask.as_ref();
 
         match &mut self.data {
             ColumnData::Bool(col_data, stats) => {
-                let entry_data = entry
-                    .inner()
-                    .values_as_bool_values()
-                    .expect("invalid flatbuffer")
-                    .values()
-                    .expect("invalid payload");
+                let data = match &write.values {
+                    ColumnWriteValues::Bool(data) => Either::Left(data.iter().cloned()),
+                    ColumnWriteValues::PackedBool(data) => {
+                        Either::Right(iter_bits(data.as_ref(), row_count))
+                    }
+                    _ => unreachable!(), // TODO: Error Handling
+                };
 
                 let data_offset = col_data.len();
                 col_data.append_unset(row_count);
 
-                let initial_non_null_count = stats.count;
+                for (idx, value) in iter_set_positions(mask).zip(data) {
+                    stats.update(&value);
 
-                for (idx, value) in iter_set_positions(&mask).zip(entry_data) {
-                    stats.update(value);
-
-                    if *value {
+                    if value {
                         col_data.set(data_offset + idx);
                     }
                 }
-                assert_eq!(
-                    stats.count - initial_non_null_count,
-                    entry_data.len() as u64
-                );
             }
             ColumnData::U64(col_data, stats) => {
-                let entry_data = entry
-                    .inner()
-                    .values_as_u64values()
-                    .expect("invalid flatbuffer")
-                    .values()
-                    .expect("invalid payload")
-                    .into_iter();
+                let data = match &write.values {
+                    ColumnWriteValues::U64(data) => data,
+                    _ => unreachable!(), // TODO: Error Handling
+                };
 
-                handle_write(row_count, &mask, entry_data, col_data, stats);
+                handle_write(row_count, mask, data.iter(), col_data, stats);
             }
             ColumnData::F64(col_data, stats) => {
-                let entry_data = entry
-                    .inner()
-                    .values_as_f64values()
-                    .expect("invalid flatbuffer")
-                    .values()
-                    .expect("invalid payload")
-                    .into_iter();
+                let data = match &write.values {
+                    ColumnWriteValues::F64(data) => data,
+                    _ => unreachable!(), // TODO: Error Handling
+                };
 
-                handle_write(row_count, &mask, entry_data, col_data, stats);
+                handle_write(row_count, mask, data.iter(), col_data, stats);
             }
             ColumnData::I64(col_data, stats) => {
-                let entry_data = entry
-                    .inner()
-                    .values_as_i64values()
-                    .expect("invalid flatbuffer")
-                    .values()
-                    .expect("invalid payload")
-                    .into_iter();
+                let data = match &write.values {
+                    ColumnWriteValues::I64(data) => data,
+                    _ => unreachable!(), // TODO: Error Handling
+                };
 
-                handle_write(row_count, &mask, entry_data, col_data, stats);
+                handle_write(row_count, mask, data.iter(), col_data, stats);
             }
             ColumnData::String(col_data, stats) => {
-                let entry_data = entry
-                    .inner()
-                    .values_as_string_values()
-                    .expect("invalid flatbuffer")
-                    .values()
-                    .expect("invalid payload");
+                let data = match &write.values {
+                    ColumnWriteValues::String(data) => data,
+                    ColumnWriteValues::PackedString(_) => todo!(),
+                    _ => unreachable!(), // TODO: Error Handling
+                };
 
                 let data_offset = col_data.len();
-                let initial_non_null_count = stats.count;
-                let to_add = entry_data.len();
 
-                for (str, idx) in entry_data.iter().zip(iter_set_positions(&mask)) {
+                let mut positions = iter_set_positions(&mask);
+                for str in data.iter() {
+                    let idx = positions.next().unwrap();
                     col_data.extend(data_offset + idx - col_data.len());
-                    stats.update(str);
-                    col_data.append(str);
+                    stats.update(str.as_ref());
+                    col_data.append(str.as_ref());
                 }
 
                 col_data.extend(data_offset + row_count - col_data.len());
-
-                assert_eq!(stats.count - initial_non_null_count, to_add as u64);
             }
             ColumnData::Tag(col_data, stats) => {
-                let entry_data = entry
-                    .inner()
-                    .values_as_string_values()
-                    .expect("invalid flatbuffer")
-                    .values()
-                    .expect("invalid payload");
+                let data = match &write.values {
+                    ColumnWriteValues::String(data) => data,
+                    ColumnWriteValues::PackedString(_) => todo!(),
+                    ColumnWriteValues::Dictionary(_) => todo!(),
+                    _ => unreachable!(), // TODO: Error Handling
+                };
 
                 let data_offset = col_data.len();
                 col_data.resize(data_offset + row_count, INVALID_DID);
 
-                let initial_non_null_count = stats.count;
-                let to_add = entry_data.len();
-
-                for (idx, value) in iter_set_positions(&mask).zip(entry_data) {
-                    stats.update(value);
-                    col_data[data_offset + idx] = dictionary.lookup_value_or_insert(value);
+                for (idx, value) in iter_set_positions(mask).zip(data.as_ref()) {
+                    stats.update(value.as_ref());
+                    col_data[data_offset + idx] =
+                        dictionary.lookup_value_or_insert(value.as_ref()).into();
                 }
-
-                assert_eq!(stats.count - initial_non_null_count, to_add as u64);
             }
         };
 
-        self.valid.append_bits(entry.row_count, &mask);
+        self.valid.append_bits(row_count, mask);
         Ok(())
     }
 
@@ -355,51 +332,22 @@ impl Column {
     }
 }
 
-/// Construct a validity mask from the given column's null mask
-fn construct_valid_mask(column: &EntryColumn<'_>) -> Result<Vec<u8>> {
-    let buf_len = (column.row_count + 7) >> 3;
-    match column.inner().null_mask() {
-        Some(data) => {
-            ensure!(
-                data.len() == buf_len,
-                InvalidNullMask {
-                    expected_bytes: buf_len,
-                    actual_bytes: data.len()
-                }
-            );
-
-            Ok(data.iter().map(|x| !x).collect())
-        }
-        None => {
-            // If no null mask they're all valid
-            let mut data = Vec::new();
-            data.resize(buf_len, 0xFF);
-            Ok(data)
-        }
-    }
-}
-
 /// Writes entry data into a column based on the valid mask
-fn handle_write<T, E>(
+fn handle_write<'a, T, E>(
     row_count: usize,
     valid_mask: &[u8],
-    entry_data: E,
+    write_data: E,
     col_data: &mut Vec<T>,
     stats: &mut StatValues<T>,
 ) where
-    T: Clone + Default + PartialOrd + IsNan,
-    E: Iterator<Item = T> + ExactSizeIterator,
+    T: Clone + Default + PartialOrd + IsNan + 'static,
+    E: Iterator<Item = &'a T> + ExactSizeIterator,
 {
     let data_offset = col_data.len();
     col_data.resize(data_offset + row_count, Default::default());
 
-    let initial_non_null_count = stats.count;
-    let to_add = entry_data.len();
-
-    for (idx, value) in iter_set_positions(valid_mask).zip(entry_data) {
-        stats.update(&value);
-        col_data[data_offset + idx] = value;
+    for (idx, value) in iter_set_positions(valid_mask).zip(write_data) {
+        stats.update(value);
+        col_data[data_offset + idx] = value.clone();
     }
-
-    assert_eq!(stats.count - initial_non_null_count, to_add as u64);
 }

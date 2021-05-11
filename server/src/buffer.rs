@@ -411,9 +411,7 @@ fn database_object_store_path(
 mod tests {
     use super::*;
     use entry::test_helpers::{lp_to_entry, sequence_entry};
-    use entry::{
-        test_helpers::lp_to_sequenced_entry as lp_2_se, SequencedEntry,
-    };
+    use entry::{test_helpers::lp_to_sequenced_entry as lp_2_se, SequencedEntry};
     use object_store::memory::InMemory;
     use std::{convert::TryFrom, ops::Deref};
 

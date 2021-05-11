@@ -360,12 +360,8 @@ fn can_move(rules: &LifecycleRules, chunk: &Chunk, now: DateTime<Utc>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data_types::server_id::ServerId;
-    use entry::{test_helpers::lp_to_entry, ClockValue};
-    use std::{
-        convert::TryFrom,
-        num::{NonZeroU32, NonZeroUsize},
-    };
+    use entry::test_helpers::lp_to_entry;
+    use std::num::{NonZeroU32, NonZeroUsize};
     use tracker::{MemRegistry, TaskRegistry};
 
     fn from_secs(secs: i64) -> DateTime<Utc> {
@@ -380,15 +376,8 @@ mod tests {
         let entry = lp_to_entry("table1 bar=10 10");
         let write = entry.partition_writes().unwrap().remove(0);
         let batch = write.table_batches().remove(0);
-        let mut chunk = Chunk::new_open(
-            batch,
-            "",
-            id,
-            ClockValue::try_from(5).unwrap(),
-            ServerId::try_from(1).unwrap(),
-            &MemRegistry::new(),
-        )
-        .unwrap();
+        let mut chunk =
+            Chunk::new_open("table1", &batch.into(), "", id, &MemRegistry::new()).unwrap();
         chunk.set_timestamps(
             time_of_first_write.map(from_secs),
             time_of_last_write.map(from_secs),
