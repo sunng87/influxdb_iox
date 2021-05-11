@@ -1,4 +1,5 @@
 mod entry;
+mod write;
 
 #[allow(unused_imports)]
 mod entry_generated;

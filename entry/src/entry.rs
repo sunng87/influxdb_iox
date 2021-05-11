@@ -3,14 +3,12 @@
 
 use std::sync::Arc;
 use std::{
-    collections::BTreeMap,
     convert::{TryFrom, TryInto},
-    fmt::Formatter,
     num::NonZeroU64,
 };
 
 use chrono::{DateTime, Utc};
-use flatbuffers::{FlatBufferBuilder, Follow, ForwardsUOffset, Vector, VectorIter, WIPOffset};
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use ouroboros::self_referencing;
 use snafu::{OptionExt, ResultExt, Snafu};
 
@@ -18,10 +16,15 @@ use data_types::{
     database_rules::{Error as DataError, Partitioner, ShardId, Sharder},
     server_id::ServerId,
 };
-use influxdb_line_protocol::{FieldValue, ParsedLine};
-use internal_types::schema::{InfluxColumnType, InfluxFieldType, TIME_COLUMN_NAME};
+use influxdb_line_protocol::ParsedLine;
+use internal_types::schema::{InfluxColumnType, InfluxFieldType};
+use internal_types::write::{ColumnWrite, ColumnWriteValues, TableWrite};
 
 use crate::entry_fb;
+use arrow_util::bitset::{count_set_bits, negate_mask};
+use hashbrown::HashMap;
+use internal_types::write::line_protocol::{lines_to_table_writes, Error as LinesError, Options};
+use std::borrow::Cow;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -30,6 +33,12 @@ pub enum Error {
 
     #[snafu(display("Error getting shard id {}", source))]
     GeneratingShardId { source: DataError },
+
+    #[snafu(display("Error adding data to column {} on line {}", source, line_number))]
+    ColumnError {
+        line_number: usize,
+        source: internal_types::write::builder::Error,
+    },
 
     #[snafu(display(
         "table {} has column {} {} with new data on line {}",
@@ -42,78 +51,79 @@ pub enum Error {
         table: String,
         column: String,
         line_number: usize,
-        source: ColumnError,
+        source: internal_types::write::builder::Error,
     },
 
     #[snafu(display("invalid flatbuffers: field {} is required", field))]
     FlatbufferFieldMissing { field: String },
 }
 
-#[derive(Debug, Snafu)]
-pub enum ColumnError {
-    #[snafu(display("type mismatch: expected {} but got {}", expected_type, new_type))]
-    ColumnTypeMismatch {
-        new_type: String,
-        expected_type: String,
-    },
-}
-
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-type ColumnResult<T, E = ColumnError> = std::result::Result<T, E>;
 
 /// Converts parsed line protocol into a collection of ShardedEntry with the
 /// underlying flatbuffers bytes generated.
-pub fn lines_to_sharded_entries(
-    lines: &[ParsedLine<'_>],
+pub fn lines_to_sharded_entries<'a>(
+    lines: impl IntoIterator<Item = &'a ParsedLine<'a>>,
     sharder: Option<&impl Sharder>,
     partitioner: &impl Partitioner,
 ) -> Result<Vec<ShardedEntry>> {
     let default_time = Utc::now();
-    let mut sharded_lines = BTreeMap::new();
+    let options = Options {
+        default_time: default_time.timestamp_nanos(),
+        ..Default::default()
+    };
 
-    for line in lines {
-        let shard_id = match &sharder {
-            Some(s) => Some(s.shard(line).context(GeneratingShardId)?),
-            None => None,
-        };
-        let partition_key = partitioner
-            .partition_key(line, &default_time)
+    let lines = lines.into_iter().map(|line| -> Result<_> {
+        let shard = sharder
+            .map(|sharder| sharder.shard(&line).context(GeneratingShardId))
+            .transpose()?;
+        let partition = partitioner
+            .partition_key(&line, &default_time)
             .context(GeneratingPartitionKey)?;
-        let table = line.series.measurement.as_str();
+        Ok(((shard, partition), line))
+    });
 
-        sharded_lines
-            .entry(shard_id)
-            .or_insert_with(BTreeMap::new)
-            .entry(partition_key)
-            .or_insert_with(BTreeMap::new)
-            .entry(table)
-            .or_insert_with(Vec::new)
-            .push(line);
+    let data = match lines_to_table_writes(lines, &options) {
+        Ok(data) => data,
+        Err(LinesError::ParseError { source, .. }) => return Err(source),
+        Err(LinesError::ColumnError {
+            line_number,
+            source,
+        }) => {
+            return Err(Error::ColumnError {
+                line_number,
+                source,
+            })
+        }
+    };
+
+    // This shenanigans is temporary, sharding will soon be handled a level above in the server
+    let mut shards: HashMap<_, HashMap<_, _>> = HashMap::new();
+    for ((shard, partition_key), tables) in data {
+        let t = shards.entry(shard).or_default();
+        let ret = t.insert(partition_key, tables);
+        assert!(ret.is_none(), "hashmap contained duplicates!")
     }
 
-    let default_time = Utc::now();
-
-    let sharded_entries = sharded_lines
+    Ok(shards
         .into_iter()
-        .map(|(shard_id, partitions)| build_sharded_entry(shard_id, partitions, &default_time))
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(sharded_entries)
+        .map(|(shard_id, partitioned)| {
+            let entry = partitioned_writes_to_entry(partitioned);
+            ShardedEntry { shard_id, entry }
+        })
+        .collect())
 }
 
-fn build_sharded_entry(
-    shard_id: Option<ShardId>,
-    partitions: BTreeMap<String, BTreeMap<&str, Vec<&ParsedLine<'_>>>>,
-    default_time: &DateTime<Utc>,
-) -> Result<ShardedEntry> {
+pub fn partitioned_writes_to_entry<'a>(
+    partitions: HashMap<String, HashMap<Cow<'a, str>, TableWrite<'a>>>,
+) -> Entry {
     let mut fbb = flatbuffers::FlatBufferBuilder::new_with_capacity(1024);
 
     let partition_writes = partitions
         .into_iter()
-        .map(|(partition_key, tables)| {
-            build_partition_write(&mut fbb, partition_key, tables, default_time)
-        })
-        .collect::<Result<Vec<_>>>()?;
+        .map(|(partition_key, tables)| build_partition_write(&mut fbb, partition_key, tables))
+        .collect::<Vec<_>>();
+
     let partition_writes = fbb.create_vector(&partition_writes);
 
     let write_operations = entry_fb::WriteOperations::create(
@@ -133,160 +143,51 @@ fn build_sharded_entry(
     fbb.finish(entry, None);
 
     let (mut data, idx) = fbb.collapse();
-    let entry = Entry::try_from(data.split_off(idx))
-        .expect("Flatbuffer data just constructed should be valid");
-
-    Ok(ShardedEntry { shard_id, entry })
+    Entry::try_from(data.split_off(idx)).expect("Flatbuffer data just constructed should be valid")
 }
 
 fn build_partition_write<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
     partition_key: String,
-    tables: BTreeMap<&str, Vec<&'a ParsedLine<'_>>>,
-    default_time: &DateTime<Utc>,
-) -> Result<flatbuffers::WIPOffset<entry_fb::PartitionWrite<'a>>> {
+    tables: HashMap<Cow<'a, str>, TableWrite<'a>>,
+) -> flatbuffers::WIPOffset<entry_fb::PartitionWrite<'a>> {
     let partition_key = fbb.create_string(&partition_key);
-
     let table_batches = tables
         .into_iter()
-        .map(|(table_name, lines)| build_table_write_batch(fbb, table_name, lines, default_time))
-        .collect::<Result<Vec<_>>>()?;
-    let table_batches = fbb.create_vector(&table_batches);
+        .map(|(table_name, write)| build_table_write_batch(fbb, table_name.as_ref(), write))
+        .collect::<Vec<_>>();
 
-    Ok(entry_fb::PartitionWrite::create(
+    let table_batches = fbb.create_vector(&table_batches);
+    entry_fb::PartitionWrite::create(
         fbb,
         &entry_fb::PartitionWriteArgs {
             key: Some(partition_key),
             table_batches: Some(table_batches),
         },
-    ))
+    )
 }
 
 fn build_table_write_batch<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
     table_name: &str,
-    lines: Vec<&'a ParsedLine<'_>>,
-    default_time: &DateTime<Utc>,
-) -> Result<flatbuffers::WIPOffset<entry_fb::TableWriteBatch<'a>>> {
-    let mut columns = BTreeMap::new();
-    for (i, line) in lines.iter().enumerate() {
-        let row_number = i + 1;
-
-        if let Some(tagset) = &line.series.tag_set {
-            for (key, value) in tagset {
-                let key = key.as_str();
-                let builder = columns
-                    .entry(key)
-                    .or_insert_with(ColumnBuilder::new_tag_column);
-                builder.null_to_row(row_number);
-                builder
-                    .push_tag(value.as_str())
-                    .context(TableColumnTypeMismatch {
-                        table: table_name,
-                        column: key,
-                        line_number: i,
-                    })?;
-            }
-        }
-
-        for (key, val) in &line.field_set {
-            let key = key.as_str();
-
-            match val {
-                FieldValue::Boolean(b) => {
-                    let builder = columns
-                        .entry(key)
-                        .or_insert_with(ColumnBuilder::new_bool_column);
-                    builder.null_to_row(row_number);
-                    builder.push_bool(*b).context(TableColumnTypeMismatch {
-                        table: table_name,
-                        column: key,
-                        line_number: i,
-                    })?;
-                }
-                FieldValue::U64(v) => {
-                    let builder = columns
-                        .entry(key)
-                        .or_insert_with(ColumnBuilder::new_u64_column);
-                    builder.null_to_row(row_number);
-                    builder.push_u64(*v).context(TableColumnTypeMismatch {
-                        table: table_name,
-                        column: key,
-                        line_number: i,
-                    })?;
-                }
-                FieldValue::F64(v) => {
-                    let builder = columns
-                        .entry(key)
-                        .or_insert_with(ColumnBuilder::new_f64_column);
-                    builder.null_to_row(row_number);
-                    builder.push_f64(*v).context(TableColumnTypeMismatch {
-                        table: table_name,
-                        column: key,
-                        line_number: i,
-                    })?;
-                }
-                FieldValue::I64(v) => {
-                    let builder = columns
-                        .entry(key)
-                        .or_insert_with(ColumnBuilder::new_i64_column);
-                    builder.null_to_row(row_number);
-                    builder.push_i64(*v).context(TableColumnTypeMismatch {
-                        table: table_name,
-                        column: key,
-                        line_number: i,
-                    })?;
-                }
-                FieldValue::String(v) => {
-                    let builder = columns
-                        .entry(key)
-                        .or_insert_with(ColumnBuilder::new_string_column);
-                    builder.null_to_row(row_number);
-                    builder
-                        .push_string(v.as_str())
-                        .context(TableColumnTypeMismatch {
-                            table: table_name,
-                            column: key,
-                            line_number: i,
-                        })?;
-                }
-            }
-        }
-
-        let builder = columns
-            .entry(TIME_COLUMN_NAME)
-            .or_insert_with(ColumnBuilder::new_time_column);
-        builder
-            .push_time(
-                line.timestamp
-                    .unwrap_or_else(|| default_time.timestamp_nanos()),
-            )
-            .context(TableColumnTypeMismatch {
-                table: table_name,
-                column: TIME_COLUMN_NAME,
-                line_number: i,
-            })?;
-
-        for b in columns.values_mut() {
-            b.null_to_row(row_number + 1);
-        }
-    }
-
-    let columns = columns
+    write: TableWrite<'a>,
+) -> flatbuffers::WIPOffset<entry_fb::TableWriteBatch<'a>> {
+    let columns = write
+        .columns
         .into_iter()
-        .map(|(column_name, builder)| builder.build_flatbuffer(fbb, column_name))
+        .map(|(column_name, write)| build_flatbuffer(column_name.as_ref(), write, fbb))
         .collect::<Vec<_>>();
     let columns = fbb.create_vector(&columns);
 
     let table_name = fbb.create_string(table_name);
 
-    Ok(entry_fb::TableWriteBatch::create(
+    entry_fb::TableWriteBatch::create(
         fbb,
         &entry_fb::TableWriteBatchArgs {
             name: Some(table_name),
             columns: Some(columns),
         },
-    ))
+    )
 }
 
 /// Holds a shard id to the associated entry. If there is no ShardId, then
@@ -382,14 +283,13 @@ pub struct TableBatch<'a> {
 }
 
 impl<'a> TableBatch<'a> {
-    /// The name of the table stored in this table batch
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &'a str {
         self.fb
             .name()
             .expect("name must be present in flatbuffers TableWriteBatch")
     }
 
-    pub fn columns(&self) -> Vec<Column<'_>> {
+    pub fn columns(&self) -> Vec<Column<'a>> {
         match self.fb.columns().as_ref() {
             Some(columns) => {
                 let row_count = self.row_count();
@@ -449,7 +349,7 @@ pub struct Column<'a> {
 }
 
 impl<'a> Column<'a> {
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &'a str {
         self.fb
             .name()
             .expect("name must be present in flatbuffers Column")
@@ -501,670 +401,111 @@ impl<'a> Column<'a> {
     pub fn is_time(&self) -> bool {
         self.fb.logical_column_type() == entry_fb::LogicalColumnType::Time
     }
-
-    pub fn values(&self) -> TypedValuesIterator<'a> {
-        match self.fb.values_type() {
-            entry_fb::ColumnValues::BoolValues => TypedValuesIterator::Bool(BoolIterator {
-                row_count: self.row_count,
-                position: 0,
-                null_mask: self.fb.null_mask(),
-                value_position: 0,
-                values: self
-                    .fb
-                    .values_as_bool_values()
-                    .expect("invalid flatbuffers")
-                    .values()
-                    .unwrap_or(&[]),
-            }),
-            entry_fb::ColumnValues::StringValues => {
-                let values = self
-                    .fb
-                    .values_as_string_values()
-                    .expect("invalid flatbuffers")
-                    .values()
-                    .expect("flatbuffers StringValues must have string values set")
-                    .iter();
-
-                TypedValuesIterator::String(StringIterator {
-                    row_count: self.row_count,
-                    position: 0,
-                    null_mask: self.fb.null_mask(),
-                    values,
-                })
-            }
-            entry_fb::ColumnValues::I64Values => {
-                let values_iter = self
-                    .fb
-                    .values_as_i64values()
-                    .expect("invalid flatbuffers")
-                    .values()
-                    .unwrap_or_else(|| Vector::new(&[], 0))
-                    .iter();
-
-                TypedValuesIterator::I64(ValIterator {
-                    row_count: self.row_count,
-                    position: 0,
-                    null_mask: self.fb.null_mask(),
-                    values_iter,
-                })
-            }
-            entry_fb::ColumnValues::F64Values => {
-                let values_iter = self
-                    .fb
-                    .values_as_f64values()
-                    .expect("invalid flatbuffers")
-                    .values()
-                    .unwrap_or_else(|| Vector::new(&[], 0))
-                    .iter();
-
-                TypedValuesIterator::F64(ValIterator {
-                    row_count: self.row_count,
-                    position: 0,
-                    null_mask: self.fb.null_mask(),
-                    values_iter,
-                })
-            }
-            entry_fb::ColumnValues::U64Values => {
-                let values_iter = self
-                    .fb
-                    .values_as_u64values()
-                    .expect("invalid flatbuffers")
-                    .values()
-                    .unwrap_or_else(|| Vector::new(&[], 0))
-                    .iter();
-
-                TypedValuesIterator::U64(ValIterator {
-                    row_count: self.row_count,
-                    position: 0,
-                    null_mask: self.fb.null_mask(),
-                    values_iter,
-                })
-            }
-            entry_fb::ColumnValues::BytesValues => unimplemented!(),
-            _ => panic!("unknown fb values type"),
-        }
-    }
 }
 
-/// Wrapper for the iterators for the underlying column types.
-#[derive(Debug)]
-pub enum TypedValuesIterator<'a> {
-    Bool(BoolIterator<'a>),
-    I64(ValIterator<'a, i64>),
-    F64(ValIterator<'a, f64>),
-    U64(ValIterator<'a, u64>),
-    String(StringIterator<'a>),
-}
+fn build_flatbuffer<'a>(
+    column_name: &str,
+    write: ColumnWrite<'a>,
+    fbb: &mut FlatBufferBuilder<'a>,
+) -> WIPOffset<entry_fb::Column<'a>> {
+    let name = Some(fbb.create_string(column_name));
+    let null_mask = if count_set_bits(&write.valid_mask) != write.row_count {
+        let mut mask = write.valid_mask.into_owned();
+        negate_mask(&mut mask, write.row_count);
+        Some(fbb.create_vector_direct(&mask))
+    } else {
+        None
+    };
 
-impl<'a> TypedValuesIterator<'a> {
-    pub fn bool_values(self) -> Option<Vec<Option<bool>>> {
-        match self {
-            Self::Bool(b) => Some(b.collect::<Vec<_>>()),
-            _ => None,
+    let values = match &write.values {
+        ColumnWriteValues::String(values) => {
+            let values = values
+                .iter()
+                .map(|v| fbb.create_string(v))
+                .collect::<Vec<_>>();
+            let values = fbb.create_vector(&values);
+            entry_fb::StringValues::create(
+                fbb,
+                &entry_fb::StringValuesArgs {
+                    values: Some(values),
+                },
+            )
+            .as_union_value()
         }
-    }
-
-    pub fn i64_values(self) -> Option<Vec<Option<i64>>> {
-        match self {
-            Self::I64(v) => Some(v.collect::<Vec<_>>()),
-            _ => None,
+        ColumnWriteValues::I64(values) => {
+            let values = fbb.create_vector(&values);
+            entry_fb::I64Values::create(
+                fbb,
+                &entry_fb::I64ValuesArgs {
+                    values: Some(values),
+                },
+            )
+            .as_union_value()
         }
-    }
-
-    pub fn f64_values(self) -> Option<Vec<Option<f64>>> {
-        match self {
-            Self::F64(v) => Some(v.collect::<Vec<_>>()),
-            _ => None,
+        ColumnWriteValues::Bool(values) => {
+            let values = fbb.create_vector(&values);
+            entry_fb::BoolValues::create(
+                fbb,
+                &entry_fb::BoolValuesArgs {
+                    values: Some(values),
+                },
+            )
+            .as_union_value()
         }
-    }
-
-    pub fn u64_values(self) -> Option<Vec<Option<u64>>> {
-        match self {
-            Self::U64(v) => Some(v.collect::<Vec<_>>()),
-            _ => None,
+        ColumnWriteValues::F64(values) => {
+            let values = fbb.create_vector(&values);
+            entry_fb::F64Values::create(
+                fbb,
+                &entry_fb::F64ValuesArgs {
+                    values: Some(values),
+                },
+            )
+            .as_union_value()
         }
-    }
-
-    pub fn type_description(&self) -> &str {
-        match self {
-            Self::Bool(_) => "bool",
-            Self::I64(_) => "i64",
-            Self::F64(_) => "f64",
-            Self::U64(_) => "u64",
-            Self::String(_) => "String",
+        ColumnWriteValues::U64(values) => {
+            let values = fbb.create_vector(&values);
+            entry_fb::U64Values::create(
+                fbb,
+                &entry_fb::U64ValuesArgs {
+                    values: Some(values),
+                },
+            )
+            .as_union_value()
         }
-    }
-}
-
-/// Iterator over the flatbuffers BoolValues
-#[derive(Debug)]
-pub struct BoolIterator<'a> {
-    pub row_count: usize,
-    position: usize,
-    null_mask: Option<&'a [u8]>,
-    values: &'a [bool],
-    value_position: usize,
-}
-
-impl<'a> Iterator for BoolIterator<'a> {
-    type Item = Option<bool>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.position >= self.row_count || self.value_position >= self.values.len() {
-            return None;
-        }
-
-        self.position += 1;
-        if is_null_value(self.position, &self.null_mask) {
-            return Some(None);
-        }
-
-        let val = Some(self.values[self.value_position]);
-        self.value_position += 1;
-
-        Some(val)
-    }
-}
-
-/// Iterator over the flatbuffers I64Values, F64Values, and U64Values.
-#[derive(Debug)]
-pub struct ValIterator<'a, T: Follow<'a> + Follow<'a, Inner = T>> {
-    pub row_count: usize,
-    position: usize,
-    null_mask: Option<&'a [u8]>,
-    values_iter: VectorIter<'a, T>,
-}
-
-impl<'a, T: Follow<'a> + Follow<'a, Inner = T>> Iterator for ValIterator<'a, T> {
-    type Item = Option<T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.position >= self.row_count {
-            return None;
-        }
-
-        self.position += 1;
-        if is_null_value(self.position, &self.null_mask) {
-            return Some(None);
-        }
-
-        Some(self.values_iter.next())
-    }
-}
-
-/// Iterator over the flatbuffers StringValues
-#[derive(Debug)]
-pub struct StringIterator<'a> {
-    pub row_count: usize,
-    position: usize,
-    null_mask: Option<&'a [u8]>,
-    values: VectorIter<'a, ForwardsUOffset<&'a str>>,
-}
-
-impl<'a> Iterator for StringIterator<'a> {
-    type Item = Option<&'a str>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.position >= self.row_count {
-            return None;
-        }
-
-        self.position += 1;
-        if is_null_value(self.position, &self.null_mask) {
-            return Some(None);
-        }
-
-        Some(self.values.next())
-    }
-}
-
-struct NullMaskBuilder {
-    bytes: Vec<u8>,
-    position: usize,
-}
-
-const BITS_IN_BYTE: usize = 8;
-const LEFT_MOST_BIT_TRUE: u8 = 128;
-
-impl NullMaskBuilder {
-    fn new() -> Self {
-        Self {
-            bytes: vec![0],
-            position: 1,
-        }
-    }
-
-    fn push(&mut self, is_null: bool) {
-        if self.position > BITS_IN_BYTE {
-            self.bytes.push(0);
-            self.position = 1;
-        }
-
-        if is_null {
-            let val: u8 = LEFT_MOST_BIT_TRUE >> (self.position - 1);
-            let last_byte_position = self.bytes.len() - 1;
-            self.bytes[last_byte_position] += val;
-        }
-
-        self.position += 1;
-    }
-
-    #[allow(dead_code)]
-    fn to_bool_vec(&self) -> Vec<bool> {
-        (1..self.row_count() + 1)
-            .map(|r| is_null_value(r, &Some(&self.bytes)))
-            .collect::<Vec<_>>()
-    }
-
-    fn row_count(&self) -> usize {
-        self.bytes.len() * BITS_IN_BYTE - BITS_IN_BYTE + self.position - 1
-    }
-
-    fn has_nulls(&self) -> bool {
-        for b in &self.bytes {
-            if *b > 0 {
-                return true;
-            }
-        }
-
-        false
-    }
-}
-
-impl std::fmt::Debug for NullMaskBuilder {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        for i in 1..self.row_count() {
-            let bit = if is_null_value(i, &Some(&self.bytes)) {
-                1
-            } else {
-                0
-            };
-
-            write!(f, "{}", bit)?;
-            if i % 4 == 0 {
-                write!(f, " ")?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
-fn is_null_value(row: usize, mask: &Option<&[u8]>) -> bool {
-    match mask {
-        Some(mask) => {
-            let mut position = (row % BITS_IN_BYTE) as u8;
-            let mut byte = row / BITS_IN_BYTE;
-
-            if position == 0 {
-                byte -= 1;
-                position = BITS_IN_BYTE as u8;
-            }
-
-            if byte >= mask.len() {
-                return true;
-            }
-
-            mask[byte] & (LEFT_MOST_BIT_TRUE >> (position - 1)) > 0
-        }
-        None => false,
-    }
-}
-
-#[derive(Debug)]
-struct ColumnBuilder<'a> {
-    nulls: NullMaskBuilder,
-    values: ColumnRaw<'a>,
-}
-
-impl<'a> ColumnBuilder<'a> {
-    fn new_tag_column() -> Self {
-        Self {
-            nulls: NullMaskBuilder::new(),
-            values: ColumnRaw::Tag(Vec::new()),
-        }
-    }
-
-    fn new_string_column() -> Self {
-        Self {
-            nulls: NullMaskBuilder::new(),
-            values: ColumnRaw::String(Vec::new()),
-        }
-    }
-
-    fn new_time_column() -> Self {
-        Self {
-            nulls: NullMaskBuilder::new(),
-            values: ColumnRaw::Time(Vec::new()),
-        }
-    }
-
-    fn new_bool_column() -> Self {
-        Self {
-            nulls: NullMaskBuilder::new(),
-            values: ColumnRaw::Bool(Vec::new()),
-        }
-    }
-
-    fn new_u64_column() -> Self {
-        Self {
-            nulls: NullMaskBuilder::new(),
-            values: ColumnRaw::U64(Vec::new()),
-        }
-    }
-
-    fn new_f64_column() -> Self {
-        Self {
-            nulls: NullMaskBuilder::new(),
-            values: ColumnRaw::F64(Vec::new()),
-        }
-    }
-
-    fn new_i64_column() -> Self {
-        Self {
-            nulls: NullMaskBuilder::new(),
-            values: ColumnRaw::I64(Vec::new()),
-        }
-    }
-
-    // ensures there are at least as many rows (or nulls) to row_number - 1
-    fn null_to_row(&mut self, row_number: usize) {
-        let mut row_count = self.nulls.row_count();
-
-        while row_count < row_number - 1 {
-            self.nulls.push(true);
-            row_count += 1;
-        }
-    }
-
-    fn push_tag(&mut self, value: &'a str) -> ColumnResult<()> {
-        match &mut self.values {
-            ColumnRaw::Tag(values) => {
-                self.nulls.push(false);
-                values.push(value)
-            }
-            _ => {
-                return ColumnTypeMismatch {
-                    new_type: "tag",
-                    expected_type: self.type_description(),
-                }
-                .fail()
-            }
-        }
-
-        Ok(())
-    }
-
-    fn push_string(&mut self, value: &'a str) -> ColumnResult<()> {
-        match &mut self.values {
-            ColumnRaw::String(values) => {
-                self.nulls.push(false);
-                values.push(value)
-            }
-            _ => {
-                return ColumnTypeMismatch {
-                    new_type: "string",
-                    expected_type: self.type_description(),
-                }
-                .fail()
-            }
-        }
-
-        Ok(())
-    }
-
-    fn push_time(&mut self, value: i64) -> ColumnResult<()> {
-        match &mut self.values {
-            ColumnRaw::Time(times) => {
-                times.push(value);
-                self.nulls.push(false);
-            }
-            _ => {
-                return ColumnTypeMismatch {
-                    new_type: "time",
-                    expected_type: self.type_description(),
-                }
-                .fail()
-            }
-        }
-
-        Ok(())
-    }
-
-    fn push_bool(&mut self, value: bool) -> ColumnResult<()> {
-        match &mut self.values {
-            ColumnRaw::Bool(values) => {
-                values.push(value);
-                self.nulls.push(false);
-            }
-            _ => {
-                return ColumnTypeMismatch {
-                    new_type: "bool",
-                    expected_type: self.type_description(),
-                }
-                .fail()
-            }
-        }
-
-        Ok(())
-    }
-
-    fn push_u64(&mut self, value: u64) -> ColumnResult<()> {
-        match &mut self.values {
-            ColumnRaw::U64(values) => {
-                values.push(value);
-                self.nulls.push(false);
-            }
-            _ => {
-                return ColumnTypeMismatch {
-                    new_type: "u64",
-                    expected_type: self.type_description(),
-                }
-                .fail()
-            }
-        }
-
-        Ok(())
-    }
-
-    fn push_f64(&mut self, value: f64) -> ColumnResult<()> {
-        match &mut self.values {
-            ColumnRaw::F64(values) => {
-                values.push(value);
-                self.nulls.push(false);
-            }
-            _ => {
-                return ColumnTypeMismatch {
-                    new_type: "f64",
-                    expected_type: self.type_description(),
-                }
-                .fail()
-            }
-        }
-
-        Ok(())
-    }
-
-    fn push_i64(&mut self, value: i64) -> ColumnResult<()> {
-        match &mut self.values {
-            ColumnRaw::I64(values) => {
-                values.push(value);
-                self.nulls.push(false);
-            }
-            _ => {
-                return ColumnTypeMismatch {
-                    new_type: "i64",
-                    expected_type: self.type_description(),
-                }
-                .fail()
-            }
-        }
-
-        Ok(())
-    }
-
-    fn build_flatbuffer(
-        &self,
-        fbb: &mut FlatBufferBuilder<'a>,
-        column_name: &str,
-    ) -> WIPOffset<entry_fb::Column<'a>> {
-        let name = Some(fbb.create_string(column_name));
-        let null_mask = if self.nulls.has_nulls() {
-            Some(fbb.create_vector_direct(&self.nulls.bytes))
-        } else {
-            None
-        };
-
-        let (logical_column_type, values_type, values) = match &self.values {
-            ColumnRaw::Tag(values) => {
-                let values = values
-                    .iter()
-                    .map(|v| fbb.create_string(v))
-                    .collect::<Vec<_>>();
-                let values = fbb.create_vector(&values);
-                let values = entry_fb::StringValues::create(
-                    fbb,
-                    &entry_fb::StringValuesArgs {
-                        values: Some(values),
-                    },
-                );
-
-                (
-                    entry_fb::LogicalColumnType::Tag,
-                    entry_fb::ColumnValues::StringValues,
-                    values.as_union_value(),
-                )
-            }
-            ColumnRaw::String(values) => {
-                let values = values
-                    .iter()
-                    .map(|v| fbb.create_string(v))
-                    .collect::<Vec<_>>();
-                let values = fbb.create_vector(&values);
-                let values = entry_fb::StringValues::create(
-                    fbb,
-                    &entry_fb::StringValuesArgs {
-                        values: Some(values),
-                    },
-                );
-
-                (
-                    entry_fb::LogicalColumnType::Field,
-                    entry_fb::ColumnValues::StringValues,
-                    values.as_union_value(),
-                )
-            }
-            ColumnRaw::Time(values) => {
-                let values = fbb.create_vector(&values);
-                let values = entry_fb::I64Values::create(
-                    fbb,
-                    &entry_fb::I64ValuesArgs {
-                        values: Some(values),
-                    },
-                );
-
-                (
-                    entry_fb::LogicalColumnType::Time,
-                    entry_fb::ColumnValues::I64Values,
-                    values.as_union_value(),
-                )
-            }
-            ColumnRaw::I64(values) => {
-                let values = fbb.create_vector(&values);
-                let values = entry_fb::I64Values::create(
-                    fbb,
-                    &entry_fb::I64ValuesArgs {
-                        values: Some(values),
-                    },
-                );
-
-                (
-                    entry_fb::LogicalColumnType::Field,
-                    entry_fb::ColumnValues::I64Values,
-                    values.as_union_value(),
-                )
-            }
-            ColumnRaw::Bool(values) => {
-                let values = fbb.create_vector(&values);
-                let values = entry_fb::BoolValues::create(
-                    fbb,
-                    &entry_fb::BoolValuesArgs {
-                        values: Some(values),
-                    },
-                );
-
-                (
-                    entry_fb::LogicalColumnType::Field,
-                    entry_fb::ColumnValues::BoolValues,
-                    values.as_union_value(),
-                )
-            }
-            ColumnRaw::F64(values) => {
-                let values = fbb.create_vector(&values);
-                let values = entry_fb::F64Values::create(
-                    fbb,
-                    &entry_fb::F64ValuesArgs {
-                        values: Some(values),
-                    },
-                );
-
-                (
-                    entry_fb::LogicalColumnType::Field,
-                    entry_fb::ColumnValues::F64Values,
-                    values.as_union_value(),
-                )
-            }
-            ColumnRaw::U64(values) => {
-                let values = fbb.create_vector(&values);
-                let values = entry_fb::U64Values::create(
-                    fbb,
-                    &entry_fb::U64ValuesArgs {
-                        values: Some(values),
-                    },
-                );
-
-                (
-                    entry_fb::LogicalColumnType::Field,
-                    entry_fb::ColumnValues::U64Values,
-                    values.as_union_value(),
-                )
-            }
-        };
-
-        entry_fb::Column::create(
-            fbb,
-            &entry_fb::ColumnArgs {
-                name,
-                logical_column_type,
-                values_type,
-                values: Some(values),
-                null_mask,
+        _ => unimplemented!(),
+    };
+
+    let (logical_column_type, values_type) = match write.influx_type {
+        InfluxColumnType::Tag => (
+            entry_fb::LogicalColumnType::Tag,
+            entry_fb::ColumnValues::StringValues,
+        ),
+        InfluxColumnType::Timestamp => (
+            entry_fb::LogicalColumnType::Time,
+            entry_fb::ColumnValues::I64Values,
+        ),
+        InfluxColumnType::Field(field) => (
+            entry_fb::LogicalColumnType::Field,
+            match field {
+                InfluxFieldType::Float => entry_fb::ColumnValues::F64Values,
+                InfluxFieldType::Integer => entry_fb::ColumnValues::I64Values,
+                InfluxFieldType::UInteger => entry_fb::ColumnValues::U64Values,
+                InfluxFieldType::String => entry_fb::ColumnValues::StringValues,
+                InfluxFieldType::Boolean => entry_fb::ColumnValues::BoolValues,
             },
-        )
-    }
+        ),
+    };
 
-    fn type_description(&self) -> &str {
-        match self.values {
-            ColumnRaw::String(_) => "string",
-            ColumnRaw::I64(_) => "i64",
-            ColumnRaw::F64(_) => "f64",
-            ColumnRaw::U64(_) => "u64",
-            ColumnRaw::Time(_) => "time",
-            ColumnRaw::Tag(_) => "tag",
-            ColumnRaw::Bool(_) => "bool",
-        }
-    }
-}
-
-#[derive(Debug)]
-enum ColumnRaw<'a> {
-    Tag(Vec<&'a str>),
-    Time(Vec<i64>),
-    I64(Vec<i64>),
-    F64(Vec<f64>),
-    U64(Vec<u64>),
-    String(Vec<&'a str>),
-    Bool(Vec<bool>),
+    entry_fb::Column::create(
+        fbb,
+        &entry_fb::ColumnArgs {
+            name,
+            logical_column_type,
+            values_type,
+            values: Some(values),
+            null_mask,
+        },
+    )
 }
 
 #[derive(Debug, PartialOrd, PartialEq, Copy, Clone)]
@@ -1555,6 +896,18 @@ pub mod test_helpers {
             .collect::<Vec<_>>()
     }
 
+    /// Sequences a given entry
+    pub fn sequence_entry(
+        server_id: u32,
+        clock_value: u64,
+        entry: &Entry
+    ) -> OwnedSequencedEntry {
+        let server_id = ServerId::try_from(server_id).unwrap();
+        let clock_value = ClockValue::try_from(clock_value).unwrap();
+
+        OwnedSequencedEntry::new_from_entry_bytes(clock_value, server_id, entry.data()).unwrap()
+    }
+
     /// Converts the line protocol to a `SequencedEntry` with the given server id
     /// and clock value
     pub fn lp_to_sequenced_entry(
@@ -1562,11 +915,7 @@ pub mod test_helpers {
         server_id: u32,
         clock_value: u64,
     ) -> OwnedSequencedEntry {
-        let entry = lp_to_entry(lp);
-        let server_id = ServerId::try_from(server_id).unwrap();
-        let clock_value = ClockValue::try_from(clock_value).unwrap();
-
-        OwnedSequencedEntry::new_from_entry_bytes(clock_value, server_id, entry.data()).unwrap()
+        sequence_entry(server_id, clock_value, &lp_to_entry(lp))
     }
 
     /// Returns a test sharder that will assign shard ids from [0, count)
@@ -1653,11 +1002,14 @@ pub mod test_helpers {
 
 #[cfg(test)]
 mod tests {
+    use arrow_util::bitset::iter_bits;
     use data_types::database_rules::NO_SHARD_CONFIG;
     use influxdb_line_protocol::parse_lines;
+    use internal_types::write::TableWrite;
 
     use super::test_helpers::*;
     use super::*;
+    use internal_types::schema::TIME_COLUMN_NAME;
 
     #[test]
     fn shards_lines() {
@@ -1669,8 +1021,9 @@ mod tests {
         .join("\n");
         let lines: Vec<_> = parse_lines(&lp).map(|l| l.unwrap()).collect();
 
-        let sharded_entries =
+        let mut sharded_entries =
             lines_to_sharded_entries(&lines, sharder(2).as_ref(), &partitioner(1)).unwrap();
+        sharded_entries.sort_by(|a, b| a.shard_id.cmp(&b.shard_id));
 
         assert_eq!(sharded_entries.len(), 2);
         assert_eq!(sharded_entries[0].shard_id, Some(0));
@@ -1707,7 +1060,8 @@ mod tests {
         let sharded_entries =
             lines_to_sharded_entries(&lines, sharder(1).as_ref(), &partitioner(2)).unwrap();
 
-        let partition_writes = sharded_entries[0].entry.partition_writes().unwrap();
+        let mut partition_writes = sharded_entries[0].entry.partition_writes().unwrap();
+        partition_writes.sort_by(|a, b| a.key().cmp(b.key()));
         assert_eq!(partition_writes.len(), 2);
         assert_eq!(partition_writes[0].key(), "key_0");
         assert_eq!(partition_writes[1].key(), "key_1");
@@ -1729,7 +1083,8 @@ mod tests {
             lines_to_sharded_entries(&lines, sharder(1).as_ref(), &partitioner(1)).unwrap();
 
         let partition_writes = sharded_entries[0].entry.partition_writes().unwrap();
-        let table_batches = partition_writes[0].table_batches();
+        let mut table_batches = partition_writes[0].table_batches();
+        table_batches.sort_by(|a, b| a.name().cmp(b.name()));
 
         assert_eq!(table_batches.len(), 3);
         assert_eq!(table_batches[0].name(), "cpu");
@@ -1749,7 +1104,8 @@ mod tests {
         let table_batches = partition_writes[0].table_batches();
         let batch = &table_batches[0];
 
-        let columns = batch.columns();
+        let mut columns = batch.columns();
+        columns.sort_by(|a, b| a.name().cmp(b.name()));
 
         assert_eq!(columns.len(), 5);
 
@@ -1796,53 +1152,46 @@ mod tests {
         let table_batches = partition_writes.first().unwrap().table_batches();
         let batch = table_batches.first().unwrap();
 
-        let columns = batch.columns();
-
         assert_eq!(batch.row_count(), 2);
+
+        let write: TableWrite = batch.into();
+        let columns = write.columns;
         assert_eq!(columns.len(), 7);
 
-        let col = columns.get(0).unwrap();
-        assert_eq!(col.name(), "bval");
-        let values = col.values().bool_values().unwrap();
-        assert_eq!(&values, &[Some(true), Some(false)]);
+        let col = &columns["bval"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(&valid, &[true, true]);
+        assert_eq!(col.values.bool().unwrap(), &[true, false]);
 
-        let col = columns.get(1).unwrap();
-        assert_eq!(col.name(), "fval");
-        let values = col.values().f64_values().unwrap();
-        assert_eq!(&values, &[Some(1.2), Some(2.2)]);
+        let col = &columns["fval"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(&valid, &[true, true]);
+        assert_eq!(col.values.f64().unwrap(), &[1.2, 2.2]);
 
-        let col = columns.get(2).unwrap();
-        assert_eq!(col.name(), "host");
-        let values = match col.values() {
-            TypedValuesIterator::String(v) => v,
-            _ => panic!("wrong type"),
-        };
-        let values = values.collect::<Vec<_>>();
-        assert_eq!(&values, &[Some("a"), Some("b")]);
+        let col = &columns["host"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(&valid, &[true, true]);
+        assert_eq!(col.values.string().unwrap(), &["a", "b"]);
 
-        let col = columns.get(3).unwrap();
-        assert_eq!(col.name(), "ival");
-        let values = col.values().i64_values().unwrap();
-        assert_eq!(&values, &[Some(23), Some(22)]);
+        let col = &columns["ival"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(&valid, &[true, true]);
+        assert_eq!(col.values.i64().unwrap(), &[23, 22]);
 
-        let col = columns.get(4).unwrap();
-        assert_eq!(col.name(), "sval");
-        let values = match col.values() {
-            TypedValuesIterator::String(v) => v,
-            _ => panic!("wrong type"),
-        };
-        let values = values.collect::<Vec<_>>();
-        assert_eq!(&values, &[Some("hi"), Some("world")]);
+        let col = &columns["sval"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(&valid, &[true, true]);
+        assert_eq!(col.values.string().unwrap(), &["hi", "world"]);
 
-        let col = columns.get(5).unwrap();
-        assert_eq!(col.name(), TIME_COLUMN_NAME);
-        let values = col.values().i64_values().unwrap();
-        assert_eq!(&values, &[Some(1), Some(2)]);
+        let col = &columns["time"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(&valid, &[true, true]);
+        assert_eq!(col.values.i64().unwrap(), &[1, 2]);
 
-        let col = columns.get(6).unwrap();
-        assert_eq!(col.name(), "uval");
-        let values = col.values().u64_values().unwrap();
-        assert_eq!(&values, &[Some(7), Some(1)]);
+        let col = &columns["uval"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(&valid, &[true, true]);
+        assert_eq!(col.values.u64().unwrap(), &[7, 1]);
     }
 
     #[test]
@@ -1867,112 +1216,65 @@ mod tests {
         let table_batches = partition_writes.first().unwrap().table_batches();
         let batch = table_batches.first().unwrap();
 
-        let columns = batch.columns();
-
         assert_eq!(batch.row_count(), 3);
+
+        let write: TableWrite = batch.into();
+        let columns = write.columns;
         assert_eq!(columns.len(), 7);
 
-        let col = columns.get(0).unwrap();
-        assert_eq!(col.name(), "bool");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Field);
-        let values = col.values().bool_values().unwrap();
-        assert_eq!(&values, &[None, None, Some(true)]);
-
-        let col = columns.get(1).unwrap();
-        assert_eq!(col.name(), "host");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Tag);
-        let values = match col.values() {
-            TypedValuesIterator::String(v) => v,
-            _ => panic!("wrong type"),
-        };
-        let values = values.collect::<Vec<_>>();
-        assert_eq!(&values, &[Some("a"), Some("a"), None]);
-
-        let col = columns.get(2).unwrap();
-        assert_eq!(col.name(), "region");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Tag);
-        let values = match col.values() {
-            TypedValuesIterator::String(v) => v,
-            _ => panic!("wrong type"),
-        };
-        let values = values.collect::<Vec<_>>();
-        assert_eq!(&values, &[None, Some("west"), None]);
-
-        let col = columns.get(3).unwrap();
-        assert_eq!(col.name(), "string");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Field);
-        let values = match col.values() {
-            TypedValuesIterator::String(v) => v,
-            _ => panic!("wrong type"),
-        };
-        let values = values.collect::<Vec<_>>();
-        assert_eq!(&values, &[None, None, Some("hello")]);
-
-        let col = columns.get(4).unwrap();
-        assert_eq!(col.name(), TIME_COLUMN_NAME);
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Time);
-        let values = col.values().i64_values().unwrap();
-        assert_eq!(&values, &[Some(983), Some(2343), Some(222)]);
-
-        let col = columns.get(5).unwrap();
-        assert_eq!(col.name(), "val");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Field);
-        let values = col.values().i64_values().unwrap();
-        assert_eq!(&values, &[Some(23), None, Some(21)]);
-
-        let col = columns.get(6).unwrap();
-        assert_eq!(col.name(), "val2");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Field);
-        let values = col.values().f64_values().unwrap();
-        assert_eq!(&values, &[None, Some(23.2), None]);
-    }
-
-    #[test]
-    fn null_mask_builder() {
-        let mut m = NullMaskBuilder::new();
-        m.push(true);
-        m.push(false);
-        m.push(true);
-        assert_eq!(m.row_count(), 3);
-        assert_eq!(m.to_bool_vec(), vec![true, false, true]);
-    }
-
-    #[test]
-    fn null_mask_builder_eight_edge_case() {
-        let mut m = NullMaskBuilder::new();
-        m.push(false);
-        m.push(true);
-        m.push(true);
-        m.push(false);
-        m.push(false);
-        m.push(true);
-        m.push(true);
-        m.push(false);
-        assert_eq!(m.row_count(), 8);
+        let col = &columns["bool"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
         assert_eq!(
-            m.to_bool_vec(),
-            vec![false, true, true, false, false, true, true, false]
+            col.influx_type,
+            InfluxColumnType::Field(InfluxFieldType::Boolean)
         );
-    }
+        assert_eq!(&valid, &[false, false, true]);
+        assert_eq!(col.values.bool().unwrap(), &[true]);
 
-    #[test]
-    fn null_mask_builder_more_than_eight() {
-        let mut m = NullMaskBuilder::new();
-        m.push(false);
-        m.push(true);
-        m.push(true);
-        m.push(false);
-        m.push(false);
-        m.push(true);
-        m.push(false);
-        m.push(false);
-        m.push(false);
-        m.push(true);
-        assert_eq!(m.row_count(), 10);
+        let col = &columns["host"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(col.influx_type, InfluxColumnType::Tag);
+        assert_eq!(&valid, &[true, true, false]);
+        assert_eq!(col.values.string().unwrap(), &["a", "a"]);
+
+        let col = &columns["region"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(col.influx_type, InfluxColumnType::Tag);
+        assert_eq!(&valid, &[false, true, false]);
+        assert_eq!(col.values.string().unwrap(), &["west"]);
+
+        let col = &columns["string"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
         assert_eq!(
-            m.to_bool_vec(),
-            vec![false, true, true, false, false, true, false, false, false, true]
+            col.influx_type,
+            InfluxColumnType::Field(InfluxFieldType::String)
         );
+        assert_eq!(&valid, &[false, false, true]);
+        assert_eq!(col.values.string().unwrap(), &["hello"]);
+
+        let col = &columns[TIME_COLUMN_NAME];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(col.influx_type, InfluxColumnType::Timestamp);
+        assert_eq!(&valid, &[true, true, true]);
+        assert_eq!(col.values.i64().unwrap(), &[983, 2343, 222]);
+
+        let col = &columns["val"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(
+            col.influx_type,
+            InfluxColumnType::Field(InfluxFieldType::Integer)
+        );
+        assert_eq!(&valid, &[true, false, true]);
+        assert_eq!(col.values.i64().unwrap(), &[23, 21]);
+
+        let col = &columns["val2"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(
+            col.influx_type,
+            InfluxColumnType::Field(InfluxFieldType::Float)
+        );
+        assert_eq!(&valid, &[false, true, false]);
+        assert_eq!(col.values.f64().unwrap(), &[23.2]);
     }
 
     #[test]
@@ -1988,15 +1290,12 @@ mod tests {
             .entry
             .partition_writes()
             .unwrap();
-        let table_batches = partition_writes.first().unwrap().table_batches();
-        let batch = table_batches.first().unwrap();
-        let columns = batch.columns();
+        let table_batch = &partition_writes[0].table_batches()[0];
+        assert_eq!(table_batch.row_count(), 1);
+        let table: TableWrite = table_batch.into();
 
-        assert_eq!(batch.row_count(), 1);
-        let col = columns.get(1).unwrap();
-        assert_eq!(col.name(), "val");
-        let values = col.values().i64_values().unwrap();
-        assert_eq!(&values, &[Some(1)]);
+        let col = &table.columns["val"];
+        assert_eq!(col.values.i64().unwrap(), &[1]);
 
         let lp = vec![
             "a val=1i 1",
@@ -2019,27 +1318,14 @@ mod tests {
             .entry
             .partition_writes()
             .unwrap();
-        let table_batches = partition_writes.first().unwrap().table_batches();
-        let batch = table_batches.first().unwrap();
-        let columns = batch.columns();
+        let table_batch = &partition_writes[0].table_batches()[0];
+        assert_eq!(table_batch.row_count(), 8);
+        let table: TableWrite = table_batch.into();
 
-        assert_eq!(batch.row_count(), 8);
-        let col = columns.get(1).unwrap();
-        assert_eq!(col.name(), "val");
-        let values = col.values().i64_values().unwrap();
-        assert_eq!(
-            &values,
-            &[
-                Some(1),
-                Some(1),
-                Some(1),
-                Some(1),
-                Some(1),
-                Some(1),
-                None,
-                Some(1)
-            ]
-        );
+        let col = &table.columns["val"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(col.values.i64().unwrap(), &[1, 1, 1, 1, 1, 1, 1]);
+        assert_eq!(&valid, &[true, true, true, true, true, true, false, true]);
 
         let lp = vec![
             "a val=1i 1",
@@ -2063,28 +1349,17 @@ mod tests {
             .entry
             .partition_writes()
             .unwrap();
-        let table_batches = partition_writes.first().unwrap().table_batches();
-        let batch = table_batches.first().unwrap();
-        let columns = batch.columns();
+        let table_batch = &partition_writes[0].table_batches()[0];
+        assert_eq!(table_batch.row_count(), 9);
+        let table: TableWrite = table_batch.into();
 
-        assert_eq!(batch.row_count(), 9);
-        let col = columns.get(1).unwrap();
-        assert_eq!(col.name(), "val");
-        let values = col.values().i64_values().unwrap();
+        let col = &table.columns["val"];
+        let valid = iter_bits(&col.valid_mask, col.row_count).collect::<Vec<_>>();
+        assert_eq!(col.values.i64().unwrap(), &[1, 1, 1, 1, 1, 1, 1, 1]);
         assert_eq!(
-            &values,
-            &[
-                Some(1),
-                Some(1),
-                Some(1),
-                Some(1),
-                Some(1),
-                Some(1),
-                None,
-                Some(1),
-                Some(1)
-            ]
-        );
+            &valid,
+            &[true, true, true, true, true, true, false, true, true]
+        )
     }
 
     #[test]
@@ -2103,15 +1378,14 @@ mod tests {
             .entry
             .partition_writes()
             .unwrap();
-        let table_batches = partition_writes.first().unwrap().table_batches();
-        let batch = table_batches.first().unwrap();
-        let columns = batch.columns();
+        let table_batch = &partition_writes[0].table_batches()[0];
+        assert_eq!(table_batch.row_count(), 2);
+        let table: TableWrite = table_batch.into();
 
-        let col = columns.get(0).unwrap();
-        assert_eq!(col.name(), TIME_COLUMN_NAME);
-        let values = col.values().i64_values().unwrap();
-        assert!(values[0].unwrap() > t);
-        assert_eq!(values[1], Some(123));
+        let col = &table.columns[TIME_COLUMN_NAME];
+        let values = col.values.i64().unwrap();
+        assert!(values[0] > t);
+        assert_eq!(values[1], 123);
     }
 
     #[test]
@@ -2160,65 +1434,7 @@ mod tests {
         let partition_writes = sequenced_entry.partition_writes().unwrap();
         let table_batches = partition_writes.first().unwrap().table_batches();
         let batch = table_batches.first().unwrap();
-
-        let columns = batch.columns();
-
         assert_eq!(batch.row_count(), 3);
-        assert_eq!(columns.len(), 7);
-
-        let col = columns.get(0).unwrap();
-        assert_eq!(col.name(), "bool");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Field);
-        let values = col.values().bool_values().unwrap();
-        assert_eq!(&values, &[None, None, Some(true)]);
-
-        let col = columns.get(1).unwrap();
-        assert_eq!(col.name(), "host");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Tag);
-        let values = match col.values() {
-            TypedValuesIterator::String(v) => v,
-            _ => panic!("wrong type"),
-        };
-        let values = values.collect::<Vec<_>>();
-        assert_eq!(&values, &[Some("a"), Some("a"), None]);
-
-        let col = columns.get(2).unwrap();
-        assert_eq!(col.name(), "region");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Tag);
-        let values = match col.values() {
-            TypedValuesIterator::String(v) => v,
-            _ => panic!("wrong type"),
-        };
-        let values = values.collect::<Vec<_>>();
-        assert_eq!(&values, &[None, Some("west"), None]);
-
-        let col = columns.get(3).unwrap();
-        assert_eq!(col.name(), "string");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Field);
-        let values = match col.values() {
-            TypedValuesIterator::String(v) => v,
-            _ => panic!("wrong type"),
-        };
-        let values = values.collect::<Vec<_>>();
-        assert_eq!(&values, &[None, None, Some("hello")]);
-
-        let col = columns.get(4).unwrap();
-        assert_eq!(col.name(), TIME_COLUMN_NAME);
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Time);
-        let values = col.values().i64_values().unwrap();
-        assert_eq!(&values, &[Some(983), Some(2343), Some(222)]);
-
-        let col = columns.get(5).unwrap();
-        assert_eq!(col.name(), "val");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Field);
-        let values = col.values().i64_values().unwrap();
-        assert_eq!(&values, &[Some(23), None, Some(21)]);
-
-        let col = columns.get(6).unwrap();
-        assert_eq!(col.name(), "val2");
-        assert_eq!(col.logical_type(), entry_fb::LogicalColumnType::Field);
-        let values = col.values().f64_values().unwrap();
-        assert_eq!(&values, &[None, Some(23.2), None]);
     }
 
     #[test]

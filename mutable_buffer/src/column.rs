@@ -368,13 +368,7 @@ fn construct_valid_mask(column: &EntryColumn<'_>) -> Result<Vec<u8>> {
                 }
             );
 
-            Ok(data
-                .iter()
-                .map(|x| {
-                    // Currently the bit mask is backwards
-                    !x.reverse_bits()
-                })
-                .collect())
+            Ok(data.iter().map(|x| !x).collect())
         }
         None => {
             // If no null mask they're all valid

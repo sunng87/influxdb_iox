@@ -410,7 +410,10 @@ fn database_object_store_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use entry::{test_helpers::lp_to_sequenced_entry as lp_2_se, SequencedEntry};
+    use entry::test_helpers::{lp_to_entry, sequence_entry};
+    use entry::{
+        test_helpers::lp_to_sequenced_entry as lp_2_se, SequencedEntry,
+    };
     use object_store::memory::InMemory;
     use std::{convert::TryFrom, ops::Deref};
 
@@ -418,15 +421,17 @@ mod tests {
     fn append_increments_current_size_and_uses_existing_segment() {
         let max = 1 << 32;
         let segment = 1 << 16;
-        let server_id = ServerId::try_from(1).unwrap();
+        let server_id = 1;
         let mut buf = Buffer::new(
             max,
             segment,
             WriteBufferRollover::ReturnError,
             false,
-            server_id,
+            ServerId::try_from(server_id).unwrap(),
         );
-        let write = lp_to_sequenced_entry(server_id, 1, "cpu val=1 10");
+        // Must parse only once as flatbuffer size depends on sort order
+        let entry = lp_to_entry("cpu val=1 10");
+        let write = Arc::new(sequence_entry(server_id, 1, &entry));
 
         let size = write.size();
         assert_eq!(0, buf.size());
@@ -434,7 +439,7 @@ mod tests {
         assert_eq!(size, buf.size());
         assert!(segment.is_none());
 
-        let write = lp_to_sequenced_entry(server_id, 2, "cpu val=1 10");
+        let write = Arc::new(sequence_entry(server_id, 2, &entry));
         let segment = buf.append(write).unwrap();
         assert_eq!(size * 2, buf.size());
         assert!(segment.is_none());
@@ -467,7 +472,7 @@ mod tests {
 
     #[test]
     fn drops_persisted_segment_when_over_size() {
-        let max = 600;
+        let max = 650;
         let segment = 1;
         let server_id = ServerId::try_from(1).unwrap();
         let mut buf = Buffer::new(
@@ -509,7 +514,7 @@ mod tests {
 
     #[test]
     fn drops_old_segment_even_if_not_persisted() {
-        let max = 600;
+        let max = 650;
         let segment = 1;
         let server_id = ServerId::try_from(1).unwrap();
         let mut buf = Buffer::new(
@@ -545,7 +550,7 @@ mod tests {
 
     #[test]
     fn drops_incoming_write_if_oldest_segment_not_persisted() {
-        let max = 600;
+        let max = 650;
         let segment = 1;
         let server_id = ServerId::try_from(1).unwrap();
         let mut buf = Buffer::new(
@@ -580,7 +585,7 @@ mod tests {
 
     #[test]
     fn returns_error_if_oldest_segment_not_persisted() {
-        let max = 600;
+        let max = 650;
         let segment = 1;
         let server_id = ServerId::try_from(1).unwrap();
         let mut buf = Buffer::new(
@@ -629,7 +634,9 @@ mod tests {
         let max = 1 << 63;
         let server_id1 = ServerId::try_from(1).unwrap();
         let server_id2 = ServerId::try_from(2).unwrap();
-        let write = lp_to_sequenced_entry(server_id1, 1, "cpu val=1 10");
+
+        let entry = lp_to_entry("cpu val=1 10");
+        let write = Arc::new(sequence_entry(1, 1, &entry));
         let segment = write.size() + 1;
         let mut buf = Buffer::new(
             max,
@@ -642,21 +649,21 @@ mod tests {
         let segment = buf.append(write).unwrap();
         assert!(segment.is_none());
 
-        let write = lp_to_sequenced_entry(server_id2, 1, "cpu val=1 10");
+        let write = Arc::new(sequence_entry(2, 1, &entry));
         let segment = buf.append(write).unwrap();
         let segment = segment.unwrap();
         assert_eq!(1, segment.id);
 
-        let write = lp_to_sequenced_entry(server_id1, 2, "cpu val=1 10");
+        let write = Arc::new(sequence_entry(1, 2, &entry));
         let segment = buf.append(write).unwrap();
         assert!(segment.is_none());
 
-        let write = lp_to_sequenced_entry(server_id1, 3, "cpu val=1 10");
+        let write = Arc::new(sequence_entry(1, 3, &entry));
         let segment = buf.append(write).unwrap();
         let segment = segment.unwrap();
         assert_eq!(2, segment.id);
 
-        let write = lp_to_sequenced_entry(server_id2, 2, "cpu val=1 10");
+        let write = Arc::new(sequence_entry(2, 2, &entry));
         let segment = buf.append(write).unwrap();
         assert!(segment.is_none());
 

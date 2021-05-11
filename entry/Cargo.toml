@@ -6,11 +6,13 @@ edition = "2018"
 description = "The entry format used by the write buffer"
 
 [dependencies]
+arrow_util = { path = "../arrow_util" }
 chrono = { version = "0.4", features = ["serde"] }
 data_types = { path = "../data_types" }
 # See docs/regenerating_flatbuffers.md about updating generated code when updating the
 # version of the flatbuffers crate
 flatbuffers = "0.8"
+hashbrown = "0.11"
 snafu = "0.6"
 influxdb_line_protocol = { path = "../influxdb_line_protocol" }
 ouroboros = "0.8.3"
