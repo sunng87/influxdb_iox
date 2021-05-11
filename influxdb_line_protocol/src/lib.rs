@@ -453,6 +453,27 @@ impl From<EscapedStr<'_>> for String {
     }
 }
 
+impl<'a> From<EscapedStr<'a>> for Cow<'a, str> {
+    fn from(other: EscapedStr<'a>) -> Self {
+        match other {
+            EscapedStr::SingleSlice(s) => Self::Borrowed(s),
+            EscapedStr::CopiedValue(s) => Self::Owned(s),
+        }
+    }
+}
+
+impl<'a, 'b> From<&'b EscapedStr<'a>> for Cow<'a, str>
+where
+    'a: 'b,
+{
+    fn from(other: &'b EscapedStr<'a>) -> Self {
+        match other {
+            EscapedStr::SingleSlice(s) => Self::Borrowed(s),
+            EscapedStr::CopiedValue(s) => Self::Owned(s.clone()),
+        }
+    }
+}
+
 impl From<&EscapedStr<'_>> for String {
     fn from(other: &EscapedStr<'_>) -> Self {
         other.to_string()
@@ -1034,7 +1055,7 @@ const FIELD_KEY_DELIMITERS: &[char] = TAG_KEY_DELIMITERS;
 /// Characters to escape when writing string values in fields
 const FIELD_VALUE_STRING_DELIMITERS: &[char] = &['"'];
 
-/// Writes a str value to f, escaping all caracters in
+/// Writes a str value to f, escaping all characters in
 /// escaping_escaping specificiation.
 ///
 /// Use the constants defined in this module

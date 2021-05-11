@@ -4,6 +4,9 @@ use crate::schema::InfluxColumnType;
 use hashbrown::HashMap;
 use std::borrow::Cow;
 
+pub mod builder;
+pub mod line_protocol;
+
 #[derive(Debug, Clone)]
 pub struct TableWrite<'a> {
     pub columns: HashMap<Cow<'a, str>, ColumnWrite<'a>>,
