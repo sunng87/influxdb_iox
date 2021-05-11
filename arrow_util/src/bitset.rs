@@ -21,6 +21,13 @@ impl BitSet {
         Self::default()
     }
 
+    /// Creates a new BitSet with `len` unset bits
+    pub fn new_with_unset(len: usize) -> Self {
+        let mut ret = Self::new();
+        ret.append_unset(len);
+        ret
+    }
+
     /// Appends `count` unset bits
     pub fn append_unset(&mut self, count: usize) {
         self.len += count;
@@ -82,9 +89,36 @@ impl BitSet {
 
     /// Returns if the given index is set
     pub fn get(&self, idx: usize) -> bool {
-        let byte_idx = idx >> 3;
-        let bit_idx = idx & 7;
-        (self.buffer[byte_idx] >> bit_idx) & 1 != 0
+        is_bit_set(idx, &self.buffer)
+    }
+
+    /// Append a boolean value
+    pub fn push(&mut self, set: bool) {
+        self.append_unset(1);
+        if set {
+            self.set(self.len - 1)
+        }
+    }
+
+    /// Returns the number of set bits
+    pub fn count_set(&self) -> usize {
+        count_set_bits(&self.buffer)
+    }
+
+    /// Returns the number of unset bits
+    pub fn count_unset(&self) -> usize {
+        let total: usize = self.buffer.iter().map(|x| x.count_zeros() as usize).sum();
+        total + (self.len & 7) - 8
+    }
+
+    /// Returns a reference to the compacted array
+    pub fn bytes(&self) -> &[u8] {
+        self.buffer.as_slice()
+    }
+
+    /// Takes the underlying buffer out of this bitset
+    pub fn take_bytes(self) -> Vec<u8> {
+        self.buffer
     }
 
     /// Converts this BitSet to a buffer compatible with arrows boolean encoding
@@ -106,6 +140,62 @@ impl BitSet {
     pub fn byte_len(&self) -> usize {
         self.buffer.len()
     }
+}
+
+#[inline]
+pub fn negate_mask(buffer: &mut [u8], row_count: usize) {
+    let whole_bytes = row_count >> 3;
+    for i in 0..whole_bytes {
+        buffer[i] = !buffer[i]
+    }
+    let remainder = row_count & 7;
+    if remainder != 0 {
+        buffer[whole_bytes] = negate_bits(buffer[whole_bytes], remainder)
+    }
+}
+
+#[inline]
+pub fn negate_bits(byte: u8, bits: usize) -> u8 {
+    let bits = bits & 7;
+    let mask = (1 << bits) - 1;
+    (!byte & mask) | (byte & !mask)
+}
+
+#[inline]
+pub fn count_set_bits(buffer: &[u8]) -> usize {
+    buffer.iter().map(|x| x.count_ones() as usize).sum()
+}
+
+#[inline]
+pub fn is_bit_set(idx: usize, buffer: &[u8]) -> bool {
+    let byte_idx = idx >> 3;
+    let bit_idx = idx & 7;
+    (buffer[byte_idx] >> bit_idx) & 1 != 0
+}
+
+/// Returns an iterator over all the bits in a packed mask
+pub fn iter_bits(bytes: &[u8], row_count: usize) -> impl Iterator<Item = bool> + '_ {
+    debug_assert!(((row_count + 7) >> 3) >= bytes.len());
+
+    let mut byte_idx = 0;
+    let mut bit_idx = 0;
+    let mut count = 0;
+    std::iter::from_fn(move || {
+        if count == row_count {
+            return None;
+        }
+
+        let ret = bytes[byte_idx] >> bit_idx & 1 != 0;
+        if bit_idx == 7 {
+            byte_idx += 1;
+            bit_idx = 0;
+        } else {
+            bit_idx += 1;
+        }
+        count += 1;
+
+        return Some(ret);
+    })
 }
 
 /// Returns an iterator over set bit positions in increasing order
@@ -161,6 +251,19 @@ mod tests {
     }
 
     #[test]
+    fn test_iter_bits() {
+        let bools = &[
+            false, false, true, true, false, false, true, false, true, false, false, true,
+        ];
+        let compacted = compact_bools(bools);
+        let c1: Vec<_> = iter_bits(&compacted, bools.len()).collect();
+        let c2: Vec<_> = iter_bits(&compacted, 9).collect();
+
+        assert_eq!(bools, c1.as_slice());
+        assert_eq!(&bools[0..9], c2.as_slice());
+    }
+
+    #[test]
     fn test_bit_mask() {
         let mut mask = BitSet::new();
 
@@ -192,6 +295,21 @@ mod tests {
         assert!(!mask.get(8));
         assert!(mask.get(9));
         assert!(mask.get(19));
+    }
+
+    #[test]
+    fn test_push() {
+        let bools = &[
+            false, true, false, true, false, false, true, true, true, false, true, true,
+        ];
+        let mut mask = BitSet::new();
+        for bool in bools {
+            mask.push(*bool)
+        }
+        let compacted = compact_bools(bools);
+        assert_eq!(compacted, mask.buffer);
+        assert_eq!(mask.count_set(), 7);
+        assert_eq!(mask.count_unset(), 5);
     }
 
     #[test]
@@ -262,5 +380,27 @@ mod tests {
 
         assert_eq!(collected.as_slice(), buffer.as_slice());
         assert_eq!(buffer.as_slice(), mask_buffer.as_slice());
+    }
+
+    #[test]
+    fn test_negate() {
+        assert_eq!(negate_bits(0b00000000, 3), 0b00000111);
+        assert_eq!(negate_bits(0b11000000, 3), 0b11000111);
+        assert_eq!(negate_bits(0b11000010, 3), 0b11000101);
+
+        let mut mask = vec![0b10111111];
+        negate_mask(mask.as_mut_slice(), 8);
+        assert_eq!(mask[0], 0b01000000);
+
+        let bools = &[
+            false, false, true, true, false, false, true, false, true, false, false, true,
+        ];
+        let negated_bools: Vec<_> = bools.iter().map(|x| !*x).collect();
+
+        let mut c1 = compact_bools(bools);
+        negate_mask(c1.as_mut_slice(), bools.len());
+        let c2 = compact_bools(&negated_bools);
+
+        assert_eq!(c1, c2)
     }
 }
