@@ -6,5 +6,8 @@ pub mod dictionary;
 pub mod string;
 pub mod util;
 
+#[cfg(feature = "fuzz")]
+pub mod fuzz;
+
 /// This has a collection of testing helper functions
 pub mod test_util;

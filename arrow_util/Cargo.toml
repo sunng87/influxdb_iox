@@ -7,12 +7,16 @@ description = "Apache Arrow utilities"
 
 [dependencies]
 
-arrow = { path = "../arrow" }
 ahash = "0.7.2"
-num-traits = "0.2"
+arrow = { path = "../arrow" }
 futures = "0.3"
-snafu = "0.6"
 hashbrown = "0.11"
+num-traits = "0.2"
+rand = { version = "0.8.3", optional = true }
+snafu = "0.6"
 
 [dev-dependencies]
 rand = "0.8.3"
+
+[features]
+fuzz = ["rand"]

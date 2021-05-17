@@ -5,14 +5,15 @@ use std::sync::Arc;
 use snafu::{ResultExt, Snafu};
 
 use arrow::{
-    array::DictionaryArray,
+    array::{DictionaryArray, UInt32Array},
     compute::{lexsort_to_indices, take, SortColumn},
     datatypes::Int32Type,
     error::ArrowError,
     record_batch::RecordBatch,
 };
 
-use crate::schema::{InfluxColumnType, Schema};
+use crate::schema::{InfluxColumnType, Schema, TIME_COLUMN_NAME};
+use hashbrown::HashMap;
 
 /// Database schema creation / validation errors.
 #[derive(Debug, Snafu)]
@@ -29,6 +30,13 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// Sort columns lexicographically in ascending order with nulls first
+#[derive(Debug, Clone)]
+pub struct SortOrder {
+    /// List of columns to lexicographically sort by
+    pub primary_key: Vec<String>,
+}
+
 /// Estimates the cardinality of a given dictionary
 ///
 /// This is an estimate because it doesn't handle the case where
@@ -40,52 +48,63 @@ pub fn estimate_cardinality(array: &DictionaryArray<Int32Type>) -> usize {
     group.len()
 }
 
-/// Sorts rows lexicographically with respect to the tag columns in increasing
-/// order of cardinality and finally with respect to time
-pub fn sort_record_batch(batch: RecordBatch) -> Result<RecordBatch> {
-    let schema: Schema = batch.schema().try_into().context(InvalidSchema)?;
+/// Computes the sort order for a set of record batches
+pub fn compute_sort_order<'a>(
+    batches: impl IntoIterator<Item = &'a RecordBatch>,
+) -> Result<SortOrder> {
+    let mut tag_cardinalities = HashMap::new();
+    for batch in batches {
+        let schema: Schema = batch.schema().try_into().context(InvalidSchema)?;
+        for (idx, (column_type, field)) in schema.iter().enumerate() {
+            if let Some(InfluxColumnType::Tag) = column_type {
+                let column = batch.column(idx);
+                let dictionary = column
+                    .as_any()
+                    .downcast_ref()
+                    .ok_or(Error::InvalidTagColumn { column: idx })?;
+                let cardinality = estimate_cardinality(dictionary);
 
-    let mut tag_cardinalities = schema
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, (column_type, _))| match column_type {
-            Some(InfluxColumnType::Tag) => Some(idx),
-            _ => None,
-        })
-        .map(|idx| {
-            let column = batch.column(idx);
-            let dictionary = column
-                .as_any()
-                .downcast_ref()
-                .ok_or(Error::InvalidTagColumn { column: idx })?;
-            Ok((Arc::clone(column), estimate_cardinality(dictionary)))
-        })
-        .collect::<Result<Vec<_>>>()?;
+                let total_cardinality = tag_cardinalities
+                    .raw_entry_mut()
+                    .from_key(field.name())
+                    .or_insert(field.name().clone(), 0_usize);
 
+                *total_cardinality.1 += cardinality;
+            }
+        }
+    }
+    let mut tag_cardinalities: Vec<_> = tag_cardinalities.into_iter().collect();
     tag_cardinalities.sort_by_key(|x| x.1);
 
-    let mut sort_columns: Vec<_> = tag_cardinalities
-        .into_iter()
-        .map(|(column, _)| SortColumn {
-            values: column,
-            options: None,
+    Ok(SortOrder {
+        primary_key: tag_cardinalities
+            .into_iter()
+            .map(|x| x.0)
+            .chain(std::iter::once(TIME_COLUMN_NAME.to_string()))
+            .collect(),
+    })
+}
+
+pub fn compute_sort_indices(batch: &RecordBatch, order: &SortOrder) -> Result<UInt32Array> {
+    let sort_columns: Vec<_> = order
+        .primary_key
+        .iter()
+        .filter_map(|column| {
+            let (column_idx, _) = batch.schema().column_with_name(column)?;
+
+            Some(SortColumn {
+                values: Arc::clone(batch.column(column_idx)),
+                options: None,
+            })
         })
         .collect();
 
-    sort_columns.extend(
-        schema
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, (column_type, _))| match column_type {
-                Some(InfluxColumnType::Timestamp) => Some(SortColumn {
-                    values: Arc::clone(batch.column(idx)),
-                    options: None,
-                }),
-                _ => None,
-            }),
-    );
+    Ok(lexsort_to_indices(&sort_columns, None)?)
+}
 
-    let indices = lexsort_to_indices(&sort_columns, None)?;
+pub fn sort_record_batch_by(batch: RecordBatch, sort_order: &SortOrder) -> Result<RecordBatch> {
+    let schema = batch.schema();
+    let indices = compute_sort_indices(&batch, &sort_order)?;
 
     let columns = batch
         .columns()
@@ -95,7 +114,14 @@ pub fn sort_record_batch(batch: RecordBatch) -> Result<RecordBatch> {
 
     // TODO: Record sort order in schema
 
-    Ok(RecordBatch::try_new(schema.as_arrow(), columns).expect("failed to recreated sorted batch"))
+    Ok(RecordBatch::try_new(schema, columns).expect("failed to recreated sorted batch"))
+}
+
+/// Sorts rows lexicographically with respect to the tag columns in increasing
+/// order of cardinality and finally with respect to time
+pub fn sort_record_batch(batch: RecordBatch) -> Result<RecordBatch> {
+    let sort_order = compute_sort_order(std::iter::once(&batch))?;
+    sort_record_batch_by(batch, &sort_order)
 }
 
 #[cfg(test)]
