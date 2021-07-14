@@ -68,23 +68,24 @@ async fn test_full_lifecycle() {
         })
         .collect();
 
-    for payload in payloads.iter().take(num_payloads - 1) {
-        // Writing the same data multiple times should be compacted away
-        for _ in 0..num_duplicates {
-            let num_lines_written = write_client
-                .write(&db_name, payload)
-                .await
-                .expect("successful write");
-            assert_eq!(num_lines_written, payload_size);
-        }
-    }
+    // duplicate the payloads
+    let payloads: Vec<_> = payloads
+        .iter()
+        .take(num_payloads - 1)
+        .flat_map(|payload| std::iter::repeat(payload.clone()).take(num_duplicates))
+        // Don't duplicate last write as it is what crosses the persist row threshold
+        .chain(std::iter::once(payloads.last().cloned().unwrap()))
+        .collect();
 
-    // Don't duplicate last write as it is what crosses the persist row threshold
+    // Write all the lines in one big chunk
     let num_lines_written = write_client
-        .write(&db_name, payloads.last().unwrap())
+        .write(&db_name, payloads.join("\n"))
         .await
         .expect("successful write");
-    assert_eq!(num_lines_written, payload_size);
+    assert_eq!(
+        num_lines_written,
+        payload_size * (num_payloads * num_duplicates - 1)
+    );
 
     wait_for_exact_chunk_states(
         &fixture,
