@@ -316,7 +316,8 @@ async fn test_chunk_get() {
             id: 0,
             storage: ChunkStorage::OpenMutableBuffer.into(),
             lifecycle_action,
-            estimated_bytes: 100,
+            memory_bytes: 100,
+            object_store_bytes: 0,
             row_count: 2,
             time_of_first_write: None,
             time_of_last_write: None,
@@ -328,7 +329,8 @@ async fn test_chunk_get() {
             id: 0,
             storage: ChunkStorage::OpenMutableBuffer.into(),
             lifecycle_action,
-            estimated_bytes: 82,
+            memory_bytes: 82,
+            object_store_bytes: 0,
             row_count: 1,
             time_of_first_write: None,
             time_of_last_write: None,
@@ -497,7 +499,8 @@ async fn test_list_partition_chunks() {
         id: 0,
         storage: ChunkStorage::OpenMutableBuffer.into(),
         lifecycle_action: ChunkLifecycleAction::Unspecified.into(),
-        estimated_bytes: 100,
+        memory_bytes: 100,
+        object_store_bytes: 0,
         row_count: 2,
         time_of_first_write: None,
         time_of_last_write: None,
@@ -818,7 +821,8 @@ fn normalize_chunks(chunks: Vec<Chunk>) -> Vec<Chunk> {
                 id,
                 storage,
                 lifecycle_action,
-                estimated_bytes,
+                memory_bytes,
+                object_store_bytes,
                 row_count,
                 ..
             } = summary;
@@ -828,11 +832,12 @@ fn normalize_chunks(chunks: Vec<Chunk>) -> Vec<Chunk> {
                 id,
                 storage,
                 lifecycle_action,
-                estimated_bytes,
                 row_count,
                 time_of_first_write: None,
                 time_of_last_write: None,
                 time_closed: None,
+                memory_bytes,
+                object_store_bytes,
             }
         })
         .collect::<Vec<_>>()
