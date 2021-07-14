@@ -69,7 +69,7 @@ async fn test_full_lifecycle() {
         .collect();
 
     // duplicate the payloads the appropriate number of times
-    let payloads: Vec<_> = payloads
+    let mut payloads: Vec<_> = payloads
         .iter()
         .take(num_payloads - 1)
         .flat_map(|payload| std::iter::repeat(payload.clone()).take(num_duplicates))
@@ -77,12 +77,19 @@ async fn test_full_lifecycle() {
         .chain(std::iter::once(payloads.last().cloned().unwrap()))
         .collect();
 
-    // Write all the lines in one big chunk so the lifecycle policy
-    // doesn't act prior to the entire dataset being written
-    let num_lines_written = write_client
+    // write in two chunks: A small one that is not large enough to
+    // trigger the compaction on its own
+    let mut num_lines_written = write_client
+        .write(&db_name, payloads.pop().unwrap())
+        .await
+        .expect("successful write");
+
+    // write all the remaini
+    num_lines_written += write_client
         .write(&db_name, payloads.join("\n"))
         .await
         .expect("successful write");
+
     assert_eq!(
         num_lines_written,
         payload_size * (num_payloads * num_duplicates - 1)
