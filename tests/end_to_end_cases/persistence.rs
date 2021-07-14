@@ -68,7 +68,7 @@ async fn test_full_lifecycle() {
         })
         .collect();
 
-    // duplicate the payloads
+    // duplicate the payloads the appropriate number of times
     let payloads: Vec<_> = payloads
         .iter()
         .take(num_payloads - 1)
@@ -77,7 +77,8 @@ async fn test_full_lifecycle() {
         .chain(std::iter::once(payloads.last().cloned().unwrap()))
         .collect();
 
-    // Write all the lines in one big chunk
+    // Write all the lines in one big chunk so the lifecycle policy
+    // doesn't act prior to the entire dataset being written
     let num_lines_written = write_client
         .write(&db_name, payloads.join("\n"))
         .await
