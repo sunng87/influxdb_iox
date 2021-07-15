@@ -17,8 +17,6 @@ pub mod pruning;
 #[cfg(test)]
 mod runner;
 #[cfg(test)]
-pub mod sql;
-#[cfg(test)]
 pub mod table_schema;
 
 // Used by the `server_benchmark` crate in addition to tests in this crate

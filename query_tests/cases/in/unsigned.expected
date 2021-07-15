@@ -1,0 +1,15 @@
+-- Test Setup: TwoMeasurementsUnsignedType
+-- SQL: SELECT town, count from restaurant;
++---------+-------+
+| town    | count |
++---------+-------+
+| andover | 40000 |
+| reading | 632   |
++---------+-------+
+-- SQL: SELECT town, count from school
++---------+-------+
+| town    | count |
++---------+-------+
+| andover | 25    |
+| reading | 17    |
++---------+-------+

@@ -48,8 +48,14 @@ pub fn get_all_setups() -> &'static HashMap<String, Arc<dyn DbSetup>> {
         vec![
             register_setup!(TwoMeasurements),
             register_setup!(TwoMeasurementsPredicatePushDown),
+            register_setup!(TwoMeasurementsManyFields),
+            register_setup!(TwoMeasurementsManyFieldsOneChunk),
+            register_setup!(TwoMeasurementsUnsignedType),
+            register_setup!(TwoMeasurementsManyFieldsLifecycle),
             register_setup!(OneMeasurementThreeChunksWithDuplicates),
             register_setup!(OneMeasurementAllChunksDropped),
+            register_setup!(OneMeasurementTwoChunksDifferentTagSet),
+            register_setup!(MultiChunkSchemaMerge),
         ]
         .into_iter()
         .map(|(name, setup)| (name.to_string(), setup as Arc<dyn DbSetup>))

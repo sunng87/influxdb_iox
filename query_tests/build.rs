@@ -13,8 +13,8 @@ fn main() -> Result<()> {
 
     let sql_files = find_sql_files(&cases);
 
-    // Tell cargo to recompile if anything in the cases directory changes
-    println!("cargo:rerun-if-changed={}", cases.display());
+    // Tell cargo to recompile if any .sql file changes in the cases directory changes
+    println!("cargo:rerun-if-changed={}/*.sql", cases.display());
 
     // Now create the generated sql file
     let output_content = make_cases_rs(&sql_files).join("\n");

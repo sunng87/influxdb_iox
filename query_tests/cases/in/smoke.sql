@@ -18,3 +18,6 @@ SELECT count(*) from cpu group by region;
 
 -- select from the second measurement
 SELECT * from disk;
+
+-- name resolution working
+select state as name from h2o UNION ALL select city as name from h2o;

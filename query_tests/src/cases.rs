@@ -19,9 +19,51 @@ async fn test_cases_all_chunks_dropped_sql() {
 }
 
 #[tokio::test]
+// Tests from "deduplicate.sql",
+async fn test_cases_deduplicate_sql() {
+    let input_path = Path::new("cases").join("in").join("deduplicate.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
+
+#[tokio::test]
+// Tests from "different_tags.sql",
+async fn test_cases_different_tags_sql() {
+    let input_path = Path::new("cases").join("in").join("different_tags.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
+
+#[tokio::test]
 // Tests from "duplicates.sql",
 async fn test_cases_duplicates_sql() {
     let input_path = Path::new("cases").join("in").join("duplicates.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
+
+#[tokio::test]
+// Tests from "information_schema.sql",
+async fn test_cases_information_schema_sql() {
+    let input_path = Path::new("cases").join("in").join("information_schema.sql");
     let mut runner = Runner::new();
     runner
         .run(input_path)
@@ -47,9 +89,79 @@ async fn test_cases_pushdown_sql() {
 }
 
 #[tokio::test]
+// Tests from "pushdown_correctness.sql",
+async fn test_cases_pushdown_correctness_sql() {
+    let input_path = Path::new("cases").join("in").join("pushdown_correctness.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
+
+#[tokio::test]
+// Tests from "schema_merge.sql",
+async fn test_cases_schema_merge_sql() {
+    let input_path = Path::new("cases").join("in").join("schema_merge.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
+
+#[tokio::test]
 // Tests from "smoke.sql",
 async fn test_cases_smoke_sql() {
     let input_path = Path::new("cases").join("in").join("smoke.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
+
+#[tokio::test]
+// Tests from "system_operations.sql",
+async fn test_cases_system_operations_sql() {
+    let input_path = Path::new("cases").join("in").join("system_operations.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
+
+#[tokio::test]
+// Tests from "system_tables.sql",
+async fn test_cases_system_tables_sql() {
+    let input_path = Path::new("cases").join("in").join("system_tables.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
+
+#[tokio::test]
+// Tests from "unsigned.sql",
+async fn test_cases_unsigned_sql() {
+    let input_path = Path::new("cases").join("in").join("unsigned.sql");
     let mut runner = Runner::new();
     runner
         .run(input_path)

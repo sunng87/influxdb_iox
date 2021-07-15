@@ -1,0 +1,38 @@
+-- Test Setup: TwoMeasurementsManyFieldsOneChunk
+-- SQL: SELECT id, partition_key, table_name, storage, memory_bytes, row_count from system.chunks;
++----+---------------+------------+-------------------+--------------+-----------+
+| id | partition_key | table_name | storage           | memory_bytes | row_count |
++----+---------------+------------+-------------------+--------------+-----------+
+| 0  | 1970-01-01T00 | o2         | OpenMutableBuffer | 177          | 2         |
+| 0  | 1970-01-01T00 | h2o        | OpenMutableBuffer | 213          | 3         |
++----+---------------+------------+-------------------+--------------+-----------+
+-- SQL: SELECT * from system.columns;
++---------------+------------+-------------+-------------+---------------+
+| partition_key | table_name | column_name | column_type | influxdb_type |
++---------------+------------+-------------+-------------+---------------+
+| 1970-01-01T00 | o2         | city        | String      | Tag           |
+| 1970-01-01T00 | o2         | reading     | F64         | Field         |
+| 1970-01-01T00 | o2         | state       | String      | Tag           |
+| 1970-01-01T00 | o2         | temp        | F64         | Field         |
+| 1970-01-01T00 | o2         | time        | I64         | Timestamp     |
+| 1970-01-01T00 | h2o        | city        | String      | Tag           |
+| 1970-01-01T00 | h2o        | other_temp  | F64         | Field         |
+| 1970-01-01T00 | h2o        | state       | String      | Tag           |
+| 1970-01-01T00 | h2o        | temp        | F64         | Field         |
+| 1970-01-01T00 | h2o        | time        | I64         | Timestamp     |
++---------------+------------+-------------+-------------+---------------+
+-- SQL: SELECT * from system.chunk_columns;
++---------------+----------+------------+-------------+-------------------+-----------+-----------+-----------+--------------+
+| partition_key | chunk_id | table_name | column_name | storage           | row_count | min_value | max_value | memory_bytes |
++---------------+----------+------------+-------------+-------------------+-----------+-----------+-----------+--------------+
+| 1970-01-01T00 | 0        | h2o        | city        | OpenMutableBuffer | 3         | Boston    | Boston    | 39           |
+| 1970-01-01T00 | 0        | h2o        | other_temp  | OpenMutableBuffer | 2         | 70.4      | 72.4      | 33           |
+| 1970-01-01T00 | 0        | h2o        | state       | OpenMutableBuffer | 3         | CA        | MA        | 45           |
+| 1970-01-01T00 | 0        | h2o        | temp        | OpenMutableBuffer | 1         | 70.4      | 70.4      | 33           |
+| 1970-01-01T00 | 0        | h2o        | time        | OpenMutableBuffer | 3         | 50        | 350       | 33           |
+| 1970-01-01T00 | 0        | o2         | city        | OpenMutableBuffer | 1         | Boston    | Boston    | 35           |
+| 1970-01-01T00 | 0        | o2         | reading     | OpenMutableBuffer | 1         | 51        | 51        | 25           |
+| 1970-01-01T00 | 0        | o2         | state       | OpenMutableBuffer | 2         | CA        | MA        | 41           |
+| 1970-01-01T00 | 0        | o2         | temp        | OpenMutableBuffer | 2         | 53.4      | 79        | 25           |
+| 1970-01-01T00 | 0        | o2         | time        | OpenMutableBuffer | 2         | 50        | 300       | 25           |
++---------------+----------+------------+-------------+-------------------+-----------+-----------+-----------+--------------+
