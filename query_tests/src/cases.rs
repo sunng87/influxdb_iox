@@ -45,3 +45,17 @@ async fn test_cases_pushdown_sql() {
         .flush()
         .expect("flush worked");
 }
+
+#[tokio::test]
+// Tests from "smoke.sql",
+async fn test_cases_smoke_sql() {
+    let input_path = Path::new("cases").join("in").join("smoke.sql");
+    let mut runner = Runner::new();
+    runner
+        .run(input_path)
+        .await
+        .expect("test failed");
+    runner
+        .flush()
+        .expect("flush worked");
+}
