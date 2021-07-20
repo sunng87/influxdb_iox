@@ -1603,7 +1603,7 @@ mod tests {
         let db = make_db().await.db;
 
         write_lp(db.as_ref(), "cpu bar=1 10").await;
-        write_lp(db.as_ref(), "cpu bar=2 10").await;
+        write_lp(db.as_ref(), "cpu bar=2 20").await;
 
         // data should be readable
         let expected = vec![
