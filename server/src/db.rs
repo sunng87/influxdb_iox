@@ -1599,6 +1599,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rollover() {
+        let db = make_db().await.db;
+
+        write_lp(db.as_ref(), "cpu bar=1 10").await;
+        write_lp(db.as_ref(), "cpu bar=2 10").await;
+
+        // data should be readable
+        let expected = vec![
+            "+-----+-------------------------------+",
+            "| bar | time                          |",
+            "+-----+-------------------------------+",
+            "| 1   | 1970-01-01 00:00:00.000000010 |",
+            "| 2   | 1970-01-01 00:00:00.000000020 |",
+            "+-----+-------------------------------+",
+        ];
+        let batches = run_query(Arc::clone(&db), "select * from cpu").await;
+        assert_batches_eq!(&expected, &batches);
+
+        db.move_chunk_to_read_buffer("cpu", "1970-01-01T00", 0)
+            .await
+            .unwrap();
+
+        // data should be readable
+        let expected = vec![
+            "+-----+-------------------------------+",
+            "| bar | time                          |",
+            "+-----+-------------------------------+",
+            "| 1   | 1970-01-01 00:00:00.000000010 |",
+            "| 2   | 1970-01-01 00:00:00.000000020 |",
+            "+-----+-------------------------------+",
+        ];
+        let batches = run_query(Arc::clone(&db), "select * from cpu").await;
+        assert_batches_eq!(&expected, &batches);
+    }
+
+    #[tokio::test]
     async fn write_with_rollover() {
         let db = make_db().await.db;
         write_lp(db.as_ref(), "cpu bar=1 10").await;
