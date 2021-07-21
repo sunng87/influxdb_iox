@@ -259,6 +259,78 @@ impl ReorgPlanner {
             provider,
         })
     }
+
+    // Invokes scan plan to deduplicate chunk data as well as sort the final output
+    // fn run_sorted_scan<C, I>(
+    //     &self,
+    //     schema: Arc<Schema>,
+    //     chunks: I,
+    //     output_sort: SortKey<'_>,
+    // ) -> Result<ScanPlan<C>>
+    // where
+    //     C: QueryChunk + 'static,
+    //     I: IntoIterator<Item = Arc<C>>,
+    // {
+    //     let mut chunks = chunks.into_iter().peekable();
+    //     let table_name = match chunks.peek() {
+    //         Some(chunk) => chunk.table_name().to_string(),
+    //         None => panic!("No chunks provided to compact plan"),
+    //     };
+    //     let table_name = &table_name;
+
+    //     // Prepare the plan for the table
+    //     let mut builder = ProviderBuilder::new(table_name, schema);
+
+    //     // There are no predicates in these plans, so no need to prune them
+    //     builder = builder.add_no_op_pruner();
+
+    //     for chunk in chunks {
+    //         // check that it is consistent with this table_name
+    //         assert_eq!(
+    //             chunk.table_name(),
+    //             table_name,
+    //             "Chunk {} expected table mismatch",
+    //             chunk.id(),
+    //         );
+
+    //         builder = builder.add_chunk(chunk);
+    //     }
+
+    //     let provider = builder.build().context(CreatingProvider { table_name })?;
+    //     let provider = Arc::new(provider);
+
+    //     // Scan all columns
+    //     let projection = None;
+
+    //     // figure out the sort expression
+    //     let sort_exprs = output_sort
+    //         .iter()
+    //         .map(|(column_name, sort_options)| Expr::Sort {
+    //             expr: Box::new(column_name.as_expr()),
+    //             asc: !sort_options.descending,
+    //             nulls_first: sort_options.nulls_first,
+    //         });
+
+    //     // let mut deduplicate = Deduplicater::new();
+    //     // let plan = deduplicate.build_scan_plan(
+    //     //     Arc::clone(&self.table_name),
+    //     //     scan_schema,
+    //     //     chunks,
+    //     //     predicate,
+    //     //     true, // make sure output data is sorted
+    //     // )?;
+
+    //     let plan_builder =
+    //         LogicalPlanBuilder::scan(table_name, Arc::clone(&provider) as _, projection)
+    //             .context(BuildingPlan)?
+    //             .sort(sort_exprs)
+    //             .context(BuildingPlan)?;
+
+    //     Ok(ScanPlan {
+    //         plan_builder,
+    //         provider,
+    //     })
+    // }
 }
 
 struct ScanPlan<C: QueryChunk + 'static> {
@@ -284,7 +356,7 @@ mod test {
         // Chunk 1 with 5 rows of data on 2 tags
         let chunk1 = Arc::new(
             TestChunk::new("t")
-                .with_time_column_with_stats(Some(5), Some(7000))
+                .with_time_column_with_stats(Some(50), Some(7000))
                 .with_tag_column_with_stats("tag1", Some("AL"), Some("MT"))
                 .with_i64_field_column("field_int")
                 .with_five_rows_of_data(),
@@ -293,8 +365,8 @@ mod test {
         // Chunk 2 has an extra field, and only 4 fields
         let chunk2 = Arc::new(
             TestChunk::new("t")
-                .with_time_column_with_stats(Some(5), Some(7000))
-                .with_tag_column_with_stats("tag1", Some("AL"), Some("MT"))
+                .with_time_column_with_stats(Some(28000), Some(220000))
+                .with_tag_column_with_stats("tag1", Some("UT"), Some("WA"))
                 .with_i64_field_column("field_int")
                 .with_i64_field_column("field_int2")
                 .with_four_rows_of_data(),
@@ -317,10 +389,10 @@ mod test {
             "+-----------+------------+------+----------------------------+",
             "| field_int | field_int2 | tag1 | time                       |",
             "+-----------+------------+------+----------------------------+",
-            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000008 |",
-            "| 10        | 10         | VT   | 1970-01-01 00:00:00.000010 |",
-            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000020 |",
-            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000010 |",
+            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028 |",
+            "| 10        | 10         | VT   | 1970-01-01 00:00:00.000210 |",
+            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220 |",
+            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210 |",
             "+-----------+------------+------+----------------------------+",
         ];
         assert_batches_eq!(&expected, &raw_data(&[Arc::clone(&chunk2)]).await);
@@ -379,9 +451,10 @@ mod test {
             "+-----------+------------+------+-------------------------------+",
             "| field_int | field_int2 | tag1 | time                          |",
             "+-----------+------------+------+-------------------------------+",
-            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000008    |",
-            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000010    |",
-            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000020    |",
+            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028    |",
+//            "| 10        | 10         | VT   | 1970-01-01 00:00:00.000210    |",
+            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210    |",
+            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220    |",
             "| 1000      |            | MT   | 1970-01-01 00:00:00.000001    |",
             "| 5         |            | MT   | 1970-01-01 00:00:00.000005    |",
             "| 10        |            | MT   | 1970-01-01 00:00:00.000007    |",
