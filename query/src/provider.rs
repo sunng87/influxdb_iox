@@ -115,7 +115,8 @@ impl<C: QueryChunk> ProviderBuilder<C> {
         }
     }
 
-    pub fn sort_output(mut self) {
+    /// Requests the output sorted after the scan
+    pub fn sort_output(&mut self) {
         self.sort_output = true;
     }
 
@@ -200,6 +201,11 @@ impl<C: QueryChunk + 'static> ChunkTableProvider<C> {
     /// Return the table name
     pub fn table_name(&self) -> &str {
         self.table_name.as_ref()
+    }
+
+    /// Requests the output sorted after the scan
+    pub fn sort_output(&mut self) {
+        self.sort_output = true;
     }
 }
 

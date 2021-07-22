@@ -81,6 +81,9 @@ pub fn persist_chunks(
             key,
             flush_timestamp,
         )?;
+        // let key_str = if let Some(sort_key) = schema.sort_key() {
+        //     format!("\"{}\"", sort_key) // for logging
+        // } else { format!("\"\"") };
 
         let physical_plan = ctx.prepare_plan(&plan)?;
         assert_eq!(

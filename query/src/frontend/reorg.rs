@@ -10,11 +10,7 @@ use datafusion_util::AsExpr;
 use internal_types::schema::{sort::SortKey, Schema, TIME_COLUMN_NAME};
 use observability_deps::tracing::{debug, trace};
 
-use crate::{
-    exec::make_stream_split,
-    provider::{ChunkTableProvider, ProviderBuilder},
-    QueryChunk,
-};
+use crate::{QueryChunk, compute_sort_key, exec::make_stream_split, provider::{ChunkTableProvider, ProviderBuilder}};
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
@@ -75,6 +71,12 @@ impl ReorgPlanner {
             plan_builder,
             provider,
         } = self.scan_and_sort_plan(schema, chunks, output_sort.clone())?;
+
+        // let ScanPlan {
+        //     plan_builder,
+        //     provider,
+        // } = self.compact_with_sorted_scan(schema, chunks)?;
+
 
         let mut schema = provider.iox_schema();
 
@@ -158,6 +160,7 @@ impl ReorgPlanner {
             plan_builder,
             provider,
         } = self.scan_and_sort_plan(schema, chunks, output_sort.clone())?;
+        //} = self.compact_with_sorted_scan(schema, chunks)?;
 
         let mut schema = provider.iox_schema();
 
@@ -261,76 +264,95 @@ impl ReorgPlanner {
     }
 
     // Invokes scan plan to deduplicate chunk data as well as sort the final output
-    // fn run_sorted_scan<C, I>(
-    //     &self,
-    //     schema: Arc<Schema>,
-    //     chunks: I,
-    //     output_sort: SortKey<'_>,
-    // ) -> Result<ScanPlan<C>>
-    // where
-    //     C: QueryChunk + 'static,
-    //     I: IntoIterator<Item = Arc<C>>,
-    // {
-    //     let mut chunks = chunks.into_iter().peekable();
-    //     let table_name = match chunks.peek() {
-    //         Some(chunk) => chunk.table_name().to_string(),
-    //         None => panic!("No chunks provided to compact plan"),
-    //     };
-    //     let table_name = &table_name;
+    fn compact_with_sorted_scan<C, I>(
+        &self,
+        schema: Arc<Schema>,
+        chunks: I,
+        //output_sort: SortKey<'_>,
+    ) -> Result<ScanPlan<C>>
+    where
+        C: QueryChunk + 'static,
+        I: IntoIterator<Item = Arc<C>>,
+    {
+        let mut chunks = chunks.into_iter().peekable();
+        let table_name = match chunks.peek() {
+            Some(chunk) => chunk.table_name().to_string(),
+            None => panic!("No chunks provided to compact plan"),
+        };
+        let table_name = &table_name;
 
-    //     // Prepare the plan for the table
-    //     let mut builder = ProviderBuilder::new(table_name, schema);
+        // Prepare the plan for the table
+        let mut builder = ProviderBuilder::new(table_name, schema);
 
-    //     // There are no predicates in these plans, so no need to prune them
-    //     builder = builder.add_no_op_pruner();
+        // There are no predicates in these plans, so no need to prune them
+        builder = builder.add_no_op_pruner();
+        builder.sort_output();
 
-    //     for chunk in chunks {
-    //         // check that it is consistent with this table_name
-    //         assert_eq!(
-    //             chunk.table_name(),
-    //             table_name,
-    //             "Chunk {} expected table mismatch",
-    //             chunk.id(),
-    //         );
+        let mut table_summaries = vec![];
+        for chunk in chunks {
+            // check that it is consistent with this table_name
+            assert_eq!(
+                chunk.table_name(),
+                table_name,
+                "Chunk {} expected table mismatch",
+                chunk.id(),
+            );
+            table_summaries.push(chunk.summary().clone());
 
-    //         builder = builder.add_chunk(chunk);
-    //     }
+            builder = builder.add_chunk(chunk);
+        }
+        let sort_key = compute_sort_key(table_summaries.iter());
 
-    //     let provider = builder.build().context(CreatingProvider { table_name })?;
-    //     let provider = Arc::new(provider);
+        let mut provider = builder.build().context(CreatingProvider { table_name })?;
+        // Request the scan output sorted
+        provider.sort_output();
+        let provider = Arc::new(provider);
 
-    //     // Scan all columns
-    //     let projection = None;
+        // Scan all columns
+        let projection = None;
 
-    //     // figure out the sort expression
-    //     let sort_exprs = output_sort
-    //         .iter()
-    //         .map(|(column_name, sort_options)| Expr::Sort {
-    //             expr: Box::new(column_name.as_expr()),
-    //             asc: !sort_options.descending,
-    //             nulls_first: sort_options.nulls_first,
-    //         });
+        // figure out the sort expression
+        // let sort_exprs = output_sort
+        //     .iter()
+        //     .map(|(column_name, sort_options)| Expr::Sort {
+        //         expr: Box::new(column_name.as_expr()),
+        //         asc: !sort_options.descending,
+        //         nulls_first: sort_options.nulls_first,
+        //     });
 
-    //     // let mut deduplicate = Deduplicater::new();
-    //     // let plan = deduplicate.build_scan_plan(
-    //     //     Arc::clone(&self.table_name),
-    //     //     scan_schema,
-    //     //     chunks,
-    //     //     predicate,
-    //     //     true, // make sure output data is sorted
-    //     // )?;
+        // let mut deduplicate = Deduplicater::new();
+        // let plan = deduplicate.build_scan_plan(
+        //     Arc::clone(&self.table_name),
+        //     scan_schema,
+        //     chunks,
+        //     predicate,
+        //     true, // make sure output data is sorted
+        // )?;
 
-    //     let plan_builder =
-    //         LogicalPlanBuilder::scan(table_name, Arc::clone(&provider) as _, projection)
-    //             .context(BuildingPlan)?
-    //             .sort(sort_exprs)
-    //             .context(BuildingPlan)?;
+        let plan_builder =
+            LogicalPlanBuilder::scan(table_name, Arc::clone(&provider) as _, projection)
+                .context(BuildingPlan)?;
 
-    //     Ok(ScanPlan {
-    //         plan_builder,
-    //         provider,
-    //     })
-    // }
+        // // Set the sort_key of the schema to the compacted chunk's sort key
+        // let mut schema = provider.iox_schema();
+        
+        // // Try to do this only if the sort key changes so we avoid unnecessary schema copies.
+        // trace!(input_schema=?schema, "Setting sort key on schema for compact plan");
+        // if schema
+        //     .sort_key()
+        //     .map_or(true, |existing_key| existing_key != sort_key)
+        // {
+        //     let mut schema_cloned = schema.as_ref().clone();
+        //     schema_cloned.set_sort_key(&sort_key);
+        //     schema = Arc::new(schema_cloned);
+        // }
+        // trace!(output_schema=?schema, "Setting sort key on schema for compact plan");
+                
+        Ok(ScanPlan {
+            plan_builder,
+            provider,
+        })
+    }
 }
 
 struct ScanPlan<C: QueryChunk + 'static> {
@@ -432,6 +454,7 @@ mod test {
 
         let (_, compact_plan) = ReorgPlanner::new()
             .compact_plan(schema, chunks, sort_key)
+            //.compact_plan(schema, chunks)
             .expect("created compact plan");
 
         let executor = Executor::new(1);
@@ -454,14 +477,14 @@ mod test {
             "+-----------+------------+------+-------------------------------+",
             "| field_int | field_int2 | tag1 | time                          |",
             "+-----------+------------+------+-------------------------------+",
-            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028    |",
-            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210    |",
-            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220    |",
+            "| 100       |            | AL   | 1970-01-01 00:00:00.000000050 |",
+            "| 70        |            | CT   | 1970-01-01 00:00:00.000000100 |",
             "| 1000      |            | MT   | 1970-01-01 00:00:00.000001    |",
             "| 5         |            | MT   | 1970-01-01 00:00:00.000005    |",
             "| 10        |            | MT   | 1970-01-01 00:00:00.000007    |",
-            "| 70        |            | CT   | 1970-01-01 00:00:00.000000100 |",
-            "| 100       |            | AL   | 1970-01-01 00:00:00.000000050 |",
+            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220    |",
+            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210    |",
+            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028    |",
             "+-----------+------------+------+-------------------------------+",
         ];
         assert_batches_eq!(&expected, &batches);
@@ -486,6 +509,7 @@ mod test {
         // split on 1000 should have timestamps 1000, 5000, and 7000
         let (_, split_plan) = ReorgPlanner::new()
             .split_plan(schema, chunks, sort_key, 1000)
+            //.split_plan(schema, chunks,  1000)
             .expect("created compact plan");
 
         let executor = Executor::new(1);
@@ -531,9 +555,9 @@ mod test {
             "+-----------+------------+------+----------------------------+",
             "| 5         |            | MT   | 1970-01-01 00:00:00.000005 |",
             "| 10        |            | MT   | 1970-01-01 00:00:00.000007 |",
-            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028 |",
-            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210 |",
             "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220 |",
+            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210 |",
+            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028 |",
             "+-----------+------------+------+----------------------------+",
         ];
         assert_batches_eq!(&expected, &batches1);
