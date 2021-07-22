@@ -101,7 +101,7 @@ pub struct ProviderBuilder<C: QueryChunk + 'static> {
     chunk_pruner: Option<Arc<dyn ChunkPruner<C>>>,
     chunks: Vec<Arc<C>>,
     /// have the scan output sorted ok PK
-    sort_output: bool, 
+    sort_output: bool,
 }
 
 impl<C: QueryChunk> ProviderBuilder<C> {
@@ -183,7 +183,7 @@ pub struct ChunkTableProvider<C: QueryChunk + 'static> {
     // The chunks
     chunks: Vec<Arc<C>>,
     /// have the scan output sorted ok PK
-    sort_output: bool, 
+    sort_output: bool,
 }
 
 impl<C: QueryChunk + 'static> ChunkTableProvider<C> {
@@ -297,9 +297,9 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
     }
 
     /// The IOx scan process needs to deduplicate data if there are duplicates. Hence it will look
-    /// like below. 
+    /// like below.
     /// Depending on the parameter, sort_output, the output data of plan will be either sorted or not sorted.
-    /// In the case of sorted plan, plan will include 2 extra operators: the final SortPreservingMergeExec on top and the SortExec 
+    /// In the case of sorted plan, plan will include 2 extra operators: the final SortPreservingMergeExec on top and the SortExec
     ///   on top of Chunk 4's IOxReadFilterNode. Detail:
     /// In this example, there are 4 chunks and should be read bottom up as follows:
     ///  . Chunks 1 and 2 overlap and need to get deduplicated. This includes these main steps:
@@ -314,9 +314,9 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
     ///  . Chunk 4 neither overlaps with other chunks nor has duplicates in itself, hence it does not
     ///      need any extra besides chunk reading.
     ///     Output data of this branch may NOT be sorted and usually in its input order.
-    /// The final UnionExec on top (just below the top SortPreservingMergeExec) is to union the streams below. 
+    /// The final UnionExec on top (just below the top SortPreservingMergeExec) is to union the streams below.
     ///   If there is only one stream, UnionExec will not be added into the plan.
-    /// In the case the parameter sort_output is true, the output of the plan must be sorted. This is done by 
+    /// In the case the parameter sort_output is true, the output of the plan must be sorted. This is done by
     ///   adding 2 operators: SortExec on top of chunk 4 to sort that chunk, and the top SortPreservingMergeExec
     ///   to merge all four already sorted streams.
     /// ```text
@@ -385,6 +385,7 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
         let mut plans: Vec<Arc<dyn ExecutionPlan>> = vec![];
         if self.no_duplicates() {
             // Neither overlaps nor duplicates, no deduplicating needed
+            trace!("All chunks in the scan neither overlap nor duplicates. The scan is simply an IOxReaderFilterNode");
             let mut non_duplicate_plans = Self::build_plans_for_non_duplicates_chunks(
                 Arc::clone(&table_name),
                 Arc::clone(&output_schema),
@@ -394,6 +395,11 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
             )?;
             plans.append(&mut non_duplicate_plans);
         } else {
+            trace!(overlapped_chunks=?self.overlapped_chunks_set.len(),
+                in_chunk_duplicates=?self.in_chunk_duplicates_chunks.len(),
+                no_duplicates_chunks=?self.no_duplicates_chunks.len(),
+                "Chunks after classifying: ");
+
             // Go over overlapped set, build deduplicate plan for each vector of overlapped chunks
             for overlapped_chunks in self.overlapped_chunks_set.to_vec() {
                 plans.push(Self::build_deduplicate_plan_for_overlapped_chunks(
@@ -2098,7 +2104,7 @@ mod test {
                 .with_three_rows_of_data(),
         );
 
-        // chunk3 no overlap, duplicates within
+        // chunk4 no overlap, duplicates within
         let chunk4 = Arc::new(
             TestChunk::new("t")
                 .with_id(4)
