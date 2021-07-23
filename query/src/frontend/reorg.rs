@@ -10,7 +10,12 @@ use datafusion_util::AsExpr;
 use internal_types::schema::{sort::SortKey, Schema, TIME_COLUMN_NAME};
 use observability_deps::tracing::{debug, trace};
 
-use crate::{QueryChunk, compute_sort_key, exec::make_stream_split, provider::{ChunkTableProvider, ProviderBuilder}};
+use crate::{
+    compute_sort_key,
+    exec::make_stream_split,
+    provider::{ChunkTableProvider, ProviderBuilder},
+    QueryChunk,
+};
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
@@ -76,7 +81,6 @@ impl ReorgPlanner {
         //     plan_builder,
         //     provider,
         // } = self.compact_with_sorted_scan(schema, chunks)?;
-
 
         let mut schema = provider.iox_schema();
 
@@ -221,6 +225,9 @@ impl ReorgPlanner {
         // Prepare the plan for the table
         let mut builder = ProviderBuilder::new(table_name, schema);
 
+        // Tell the scan of this provider to sort its output
+        builder.sort_output();
+
         // There are no predicates in these plans, so no need to prune them
         builder = builder.add_no_op_pruner();
 
@@ -301,7 +308,7 @@ impl ReorgPlanner {
 
             builder = builder.add_chunk(chunk);
         }
-        let sort_key = compute_sort_key(table_summaries.iter());
+        let _sort_key = compute_sort_key(table_summaries.iter());
 
         let mut provider = builder.build().context(CreatingProvider { table_name })?;
         // Request the scan output sorted
@@ -335,7 +342,7 @@ impl ReorgPlanner {
 
         // // Set the sort_key of the schema to the compacted chunk's sort key
         // let mut schema = provider.iox_schema();
-        
+
         // // Try to do this only if the sort key changes so we avoid unnecessary schema copies.
         // trace!(input_schema=?schema, "Setting sort key on schema for compact plan");
         // if schema
@@ -347,7 +354,7 @@ impl ReorgPlanner {
         //     schema = Arc::new(schema_cloned);
         // }
         // trace!(output_schema=?schema, "Setting sort key on schema for compact plan");
-                
+
         Ok(ScanPlan {
             plan_builder,
             provider,
@@ -477,14 +484,14 @@ mod test {
             "+-----------+------------+------+-------------------------------+",
             "| field_int | field_int2 | tag1 | time                          |",
             "+-----------+------------+------+-------------------------------+",
-            "| 100       |            | AL   | 1970-01-01 00:00:00.000000050 |",
-            "| 70        |            | CT   | 1970-01-01 00:00:00.000000100 |",
+            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028    |",
+            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210    |",
+            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220    |",
             "| 1000      |            | MT   | 1970-01-01 00:00:00.000001    |",
             "| 5         |            | MT   | 1970-01-01 00:00:00.000005    |",
             "| 10        |            | MT   | 1970-01-01 00:00:00.000007    |",
-            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220    |",
-            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210    |",
-            "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028    |",
+            "| 70        |            | CT   | 1970-01-01 00:00:00.000000100 |",
+            "| 100       |            | AL   | 1970-01-01 00:00:00.000000050 |",
             "+-----------+------------+------+-------------------------------+",
         ];
         assert_batches_eq!(&expected, &batches);
@@ -555,9 +562,9 @@ mod test {
             "+-----------+------------+------+----------------------------+",
             "| 5         |            | MT   | 1970-01-01 00:00:00.000005 |",
             "| 10        |            | MT   | 1970-01-01 00:00:00.000007 |",
-            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220 |",
-            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210 |",
             "| 1000      | 1000       | WA   | 1970-01-01 00:00:00.000028 |",
+            "| 50        | 50         | VT   | 1970-01-01 00:00:00.000210 |",
+            "| 70        | 70         | UT   | 1970-01-01 00:00:00.000220 |",
             "+-----------+------------+------+----------------------------+",
         ];
         assert_batches_eq!(&expected, &batches1);

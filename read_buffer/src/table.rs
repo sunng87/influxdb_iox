@@ -702,6 +702,11 @@ impl MetaData {
                 let count = self.rows;
                 let distinct_count = column_meta.distinct_count;
 
+                println!(
+                    "     rub to_summary: column_meta.range: {:?}",
+                    column_meta.range
+                );
+
                 let stats = match &column_meta.range {
                     (OwnedValue::String(min), OwnedValue::String(max)) => {
                         Statistics::String(StatValues {

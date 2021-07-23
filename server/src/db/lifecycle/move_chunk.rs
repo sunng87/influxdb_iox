@@ -53,11 +53,17 @@ pub fn move_chunk_to_read_buffer(
         // Cannot move query_chunks as the sort key borrows the column names
         let (schema, plan) =
             ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone), key)?;
-            //ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone))?;
+        //ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone))?;
+
+        println!(
+            "--- move_chunk_to_read_buffer: Done compacting. About to write compacting data to RUB"
+        );
 
         let physical_plan = ctx.prepare_plan(&plan)?;
         let stream = ctx.execute(physical_plan).await?;
         collect_rub(stream, &mut rb_chunk).await?;
+
+        println!("     move_chunk_to_read_buffer: Done creating RUB");
 
         // Can drop and re-acquire as lifecycle action prevents concurrent modification
         let mut guard = chunk.write();

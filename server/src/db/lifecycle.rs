@@ -345,12 +345,20 @@ async fn collect_rub(
 ) -> Result<()> {
     use futures::StreamExt;
 
+    println!("     lifecycle::collect_rub");
+    let mut i = 0;
+
     while let Some(batch) = stream.next().await {
         let batch = batch?;
+
+        // println!("     ----- BATCH: {:#?}", batch);
+        i += 1;
+
         if batch.num_rows() > 0 {
             chunk.upsert_table(batch)
         }
     }
+    println!("Total batches: {}", i);
     Ok(())
 }
 

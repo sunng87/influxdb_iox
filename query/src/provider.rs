@@ -377,8 +377,10 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
         predicate: Predicate,
         sort_output: bool,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        // find overlapped chunks and put them into the right group
-        self.split_overlapped_chunks(chunks.to_vec())?;
+        println!(
+            "     start build_scan_plan with sort_output: {}",
+            sort_output
+        );
 
         // Initialize an empty sort key
         let mut output_sort_key = SortKey::with_capacity(0);
@@ -386,6 +388,9 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
             // Compute the output sort key which is the super key of chunks' keys base on their data cardinality
             output_sort_key = compute_sort_key(chunks.iter().map(|x| x.summary()));
         }
+
+        // find overlapped chunks and put them into the right group
+        self.split_overlapped_chunks(chunks.to_vec())?;
 
         // Building plans
         let mut plans: Vec<Arc<dyn ExecutionPlan>> = vec![];
@@ -553,7 +558,7 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
             if let Some(sort_key) = SortKey::try_merge_key(super_sort_key, &output_sort_key) {
                 output_sort_key = sort_key;
             } else {
-                panic!("No sort key found for the input chunks");
+                output_sort_key = super_sort_key.to_owned();
             }
         }
         trace!(output_sort_key=?output_sort_key, "Computed the sort key for the input chunks");
@@ -636,17 +641,26 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
         let input_schema = Self::compute_input_schema(&output_schema, &pk_schema);
 
         // Compute the output sort key for this chunk
-        let chunk_sort_key = compute_sort_key(vec![chunk.summary()].into_iter());
-        // get super key of this chunk with the input one
-        let mut output_sort_key = chunk_sort_key;
-        if !super_sort_key.is_empty() {
-            if let Some(sort_key) = SortKey::try_merge_key(super_sort_key, &output_sort_key) {
-                output_sort_key = sort_key;
-            } else {
-                panic!("No sort key found for the input chunk {}", chunk.id());
-            }
-        }
+        let mut output_sort_key = if !super_sort_key.is_empty() {
+            super_sort_key.to_owned()
+        } else {
+            compute_sort_key(vec![chunk.summary()].into_iter())
+        };
         trace!(output_sort_key=?output_sort_key,chunk_id=?chunk.id(), "Computed the sort key for the input chunk");
+
+        // // Compute the output sort key for this chunk
+        // let chunk_sort_key = compute_sort_key(vec![chunk.summary()].into_iter());
+        // // get super key of this chunk with the input one
+        // let mut output_sort_key = chunk_sort_key;
+        // if !super_sort_key.is_empty() {
+        //     println!("     build_deduplicate_plan_for_chunk_with_duplicates\n      super_sort_key: {:#?}\n      chunk_sort_key: {:#?}", super_sort_key, output_sort_key);
+        //     if let Some(sort_key) = SortKey::try_merge_key(super_sort_key, &output_sort_key) {
+        //         output_sort_key = sort_key;
+        //     } else {
+        //         panic!("No sort key found for the input chunk {}", chunk.id());
+        //     }
+        // }
+        // trace!(output_sort_key=?output_sort_key,chunk_id=?chunk.id(), "Computed the sort key for the input chunk");
 
         // Create the 2 bottom nodes IOxReadFilterNode and SortExec
         let plan = Self::build_sort_plan_for_read_filter(
@@ -657,12 +671,20 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
             &output_sort_key,
         )?;
 
+        // The sort key of this chunk might only the subset of the super sort key
+        if !super_sort_key.is_empty() {
+            // First get the chunk pk columns
+            let schema = chunk.schema();
+            let key_columns = schema.primary_key();
+
+            // Now get the key subset of the super key that includes the chunk's pk columns
+            output_sort_key = super_sort_key.selected_sort_key(key_columns.clone());
+        }
+
         // Add DeduplicateExc
         // Sort exprs for the deduplication
         let sort_exprs = arrow_sort_key_exprs(output_sort_key, &plan.schema());
-
-        trace!(Sort_Exprs=?sort_exprs, chunk_ID=?chunk.id(), "Sort Expression for the sort operator of chunk");
-
+        trace!(Sort_Exprs=?sort_exprs, chunk_ID=?chunk.id(), "Sort Expression for the deduplicate node of chunk");
         let plan = Self::add_deduplicate_node(sort_exprs, plan);
 
         // select back to the requested output schema

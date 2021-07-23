@@ -84,15 +84,16 @@ pub(crate) fn compact_chunks(
         // Cannot move query_chunks as the sort key borrows the column names
         let (schema, plan) =
             ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone), key)?;
-            //ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone))?;
+        //ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone))?;
         // let key_str = if let Some(sort_key) = schema.sort_key() {
         //     format!("\"{}\"", sort_key) // for logging
         // } else { format!("\"\"") };
-        
-
 
         let physical_plan = ctx.prepare_plan(&plan)?;
         let stream = ctx.execute(physical_plan).await?;
+
+        println!("--- compact_chunks: Done compacting chunks: {:?}. About to write compacting data to RUB", chunk_ids);
+
         collect_rub(stream, &mut rb_chunk).await?;
         let rb_row_groups = rb_chunk.row_groups();
 
@@ -103,6 +104,8 @@ pub(crate) fn compact_chunks(
             }
             partition.create_rub_chunk(rb_chunk, schema)
         };
+
+        println!("     compact_chunks: Done creating RUB");
 
         let guard = new_chunk.read();
         let elapsed = now.elapsed();

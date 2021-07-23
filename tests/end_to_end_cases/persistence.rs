@@ -78,6 +78,8 @@ async fn write_data(
 
 #[tokio::test]
 async fn test_full_lifecycle() {
+    test_helpers::maybe_start_logging();
+
     let fixture = ServerFixture::create_shared().await;
     let mut write_client = fixture.write_client();
 
