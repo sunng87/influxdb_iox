@@ -56,10 +56,6 @@ pub fn move_chunk_to_read_buffer(
             ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone), key)?;
         //ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone))?;
 
-        println!(
-            "--- move_chunk_to_read_buffer: Done compacting. About to write compacting data to RUB"
-        );
-
         let physical_plan = ctx.prepare_plan(&plan)?;
         let stream = ctx.execute(physical_plan).await?;
         let rb_chunk = collect_rub(
@@ -70,8 +66,6 @@ pub fn move_chunk_to_read_buffer(
             time_of_last_write,
         )
         .await?;
-
-        println!("     move_chunk_to_read_buffer: Done creating RUB");
 
         // Can drop and re-acquire as lifecycle action prevents concurrent modification
         let mut guard = chunk.write();

@@ -11,7 +11,6 @@ use datafusion::{
     error::{DataFusionError, Result as DataFusionResult},
     logical_plan::Expr,
     physical_plan::{
-        displayable,
         expressions::{col as physical_col, PhysicalSortExpr},
         projection::ProjectionExec,
         sort::SortExec,
@@ -23,12 +22,7 @@ use datafusion::{
 use internal_types::schema::{merge::SchemaMerger, sort::SortKey, Schema};
 use observability_deps::tracing::{debug, info, trace};
 
-use crate::{
-    compute_sort_key,
-    predicate::{Predicate, PredicateBuilder},
-    util::arrow_sort_key_exprs,
-    QueryChunk,
-};
+use crate::{QueryChunk, compute_sort_key, predicate::{Predicate, PredicateBuilder}, util::arrow_sort_key_exprs};
 
 use snafu::{ResultExt, Snafu};
 
@@ -101,7 +95,7 @@ pub struct ProviderBuilder<C: QueryChunk + 'static> {
     schema: Arc<Schema>,
     chunk_pruner: Option<Arc<dyn ChunkPruner<C>>>,
     chunks: Vec<Arc<C>>,
-    /// have the scan output sorted ok PK
+    /// have the scan output sorted on PK
     sort_output: bool,
 }
 
@@ -116,7 +110,7 @@ impl<C: QueryChunk> ProviderBuilder<C> {
         }
     }
 
-    /// Requests the output sorted after the scan
+    /// Requests the output of the scan sorted
     pub fn sort_output(&mut self) {
         self.sort_output = true;
     }
@@ -204,7 +198,7 @@ impl<C: QueryChunk + 'static> ChunkTableProvider<C> {
         self.table_name.as_ref()
     }
 
-    /// Requests the output sorted after the scan
+    /// Requests the output of the scan sorted
     pub fn sort_output(&mut self) {
         self.sort_output = true;
     }
@@ -378,11 +372,6 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
         predicate: Predicate,
         sort_output: bool,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        println!(
-            "     start build_scan_plan with sort_output: {}",
-            sort_output
-        );
-
         // Initialize an empty sort key
         let mut output_sort_key = SortKey::with_capacity(0);
         if sort_output {
@@ -446,38 +435,30 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
             }
         }
 
-        match plans.len() {
+        if plans.is_empty() {
             // No plan generated. Something must go wrong
             // Even if the chunks are empty, IOxReadFilterNode is still created
-            0 => panic!("Internal error generating deduplicate plan"),
-            // Only one plan, no need to add union node
-            // Return the plan itself
-            // This only plan will be already sorted if sort_output is true
-            1 => {
-                let plan = plans.remove(0);
-                trace!(text=%displayable(plan.as_ref()).indent(), "Single branch scan plan");
-                Ok(plan)
-            }
-            // Has many plans and need to union them
-            _ => {
-                // Union all sub plans
-                let plan = Arc::new(UnionExec::new(plans));
-                if !sort_output {
-                    trace!("Scan output is not required to be sorted");
-                    trace!(text=%displayable(plan.as_ref()).indent(), "Final scan plan with Union on top");
-                    return Ok(plan);
-                }
-
-                // Sort merge the sorted plans
-                let sort_exprs = arrow_sort_key_exprs(output_sort_key, &plan.schema());
-                let plan = Arc::new(SortPreservingMergeExec::new(
-                    sort_exprs, plan, BATCH_SIZE,
-                ));
-                trace!("Scan output must be sorted");
-                trace!(text=%displayable(plan.as_ref()).indent(), "Final scan plan with SortPreservingMergeExec on top");
-                Ok(plan)
-            }
+            panic!("Internal error generating deduplicate plan");
         }
+
+        let mut plan = match plans.len() {
+            //One child plan, no need to add Union
+            1 => plans.remove(0),
+            // many child plans, add Union
+            _ => Arc::new(UnionExec::new(plans)),
+        };
+
+        if sort_output {
+            // Sort preserving merge the sorted plans
+            // Note that even if the plan is a single plan (aka no UnionExec on top),
+            // we still need to add this SortPreservingMergeExec because:
+            //    1. It will provide a sorted signal(through Datafusion's Distribution::UnspecifiedDistribution)
+            //    2. And it will not do anything extra if the input is one partition so won't affect performance
+            let sort_exprs = arrow_sort_key_exprs(output_sort_key, &plan.schema());
+            plan = Arc::new(SortPreservingMergeExec::new(sort_exprs, plan, BATCH_SIZE));
+        }
+
+        Ok(plan)
     }
 
     /// discover overlaps and split them into three groups:
@@ -560,7 +541,7 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
         let pk_schema = Self::compute_pk_schema(&chunks);
         let input_schema = Self::compute_input_schema(&output_schema, &pk_schema);
 
-        // Compute the output sort key which is the super key of chunks' keys base on their data cardinality
+        // Compute the output sort key which is the super key of chunks' keys based on their data cardinality
         let chunks_sort_key = compute_sort_key(chunks.iter().map(|x| x.summary()));
         // get super key of these chunks with the input one
         let mut output_sort_key = chunks_sort_key;
@@ -568,6 +549,7 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
             if let Some(sort_key) = SortKey::try_merge_key(super_sort_key, &output_sort_key) {
                 output_sort_key = sort_key;
             } else {
+                // Not found the same sort order in the super key, must use the order of super key for the sort
                 output_sort_key = super_sort_key.to_owned();
             }
         }
@@ -657,20 +639,6 @@ impl<C: QueryChunk + 'static> Deduplicater<C> {
             compute_sort_key(vec![chunk.summary()].into_iter())
         };
         trace!(output_sort_key=?output_sort_key,chunk_id=?chunk.id(), "Computed the sort key for the input chunk");
-
-        // // Compute the output sort key for this chunk
-        // let chunk_sort_key = compute_sort_key(vec![chunk.summary()].into_iter());
-        // // get super key of this chunk with the input one
-        // let mut output_sort_key = chunk_sort_key;
-        // if !super_sort_key.is_empty() {
-        //     println!("     build_deduplicate_plan_for_chunk_with_duplicates\n      super_sort_key: {:#?}\n      chunk_sort_key: {:#?}", super_sort_key, output_sort_key);
-        //     if let Some(sort_key) = SortKey::try_merge_key(super_sort_key, &output_sort_key) {
-        //         output_sort_key = sort_key;
-        //     } else {
-        //         panic!("No sort key found for the input chunk {}", chunk.id());
-        //     }
-        // }
-        // trace!(output_sort_key=?output_sort_key,chunk_id=?chunk.id(), "Computed the sort key for the input chunk");
 
         // Create the 2 bottom nodes IOxReadFilterNode and SortExec
         let plan = Self::build_sort_plan_for_read_filter(

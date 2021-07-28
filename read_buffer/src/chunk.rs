@@ -155,7 +155,6 @@ impl Chunk {
     /// The data is converted to a `RowGroup` outside of any locking so the
     /// caller does not need to be concerned about the size of the update.
     pub fn upsert_table(&mut self, table_data: RecordBatch) {
-        println!("     read_buffer::upsert_table");
         let table_name = self.table.name();
         let row_group = record_batch_to_row_group_with_logging(&table_name, table_data);
 

@@ -339,8 +339,6 @@ fn collect_rub(
 ) -> impl futures::Future<Output = Result<Option<read_buffer::RBChunk>>> {
     use futures::{future, StreamExt, TryStreamExt};
 
-    println!("     lifecycle::collect_rub");
-
     let table_name = table_name.to_string();
     let metrics = db
         .metrics_registry

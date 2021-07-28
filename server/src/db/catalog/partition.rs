@@ -159,11 +159,6 @@ impl Partition {
 
         let addr = ChunkAddr::new(&self.addr, chunk_id);
         info!(%addr, row_count=chunk.rows(), "inserting RUB chunk to catalog");
-        println!(
-            "     Inserting RUB chunk to catalog. Addr: {}, row count: {}",
-            addr,
-            chunk.rows()
-        );
 
         let chunk = Arc::new(self.metrics.new_chunk_lock(CatalogChunk::new_rub_chunk(
             addr,

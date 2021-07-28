@@ -64,8 +64,6 @@ pub struct RowGroup {
 
 impl RowGroup {
     pub fn new(rows: u32, columns: Vec<(String, ColumnType)>) -> Self {
-        println!("     row_group::new - num cols: {}", columns.len());
-
         let mut meta = MetaData {
             rows,
             ..MetaData::default()
@@ -1197,7 +1195,6 @@ impl From<RecordBatch> for RowGroup {
             }
         }
 
-        println!("     RowGroup::from");
         Self::new(rows as u32, columns)
     }
 }
@@ -1635,11 +1632,6 @@ impl MetaData {
         null_count: u32,
         distinct_count: Option<NonZeroU64>,
     ) {
-        println!(
-            "     RowGroup::new - then add_column - range(): {:?}",
-            range
-        );
-
         self.column_names.push(name.to_owned());
         self.columns.insert(
             name.to_owned(),

@@ -185,7 +185,6 @@ fn generate_row_group(rows: usize, rng: &mut ThreadRng) -> RowGroup {
         ),
     ];
 
-    println!("     read_filter::generate_row_group");
     RowGroup::new(rows as u32, columns)
 }
 
