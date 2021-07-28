@@ -77,6 +77,7 @@ async fn write_data(
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_full_lifecycle() {
     test_helpers::maybe_start_logging();
 
