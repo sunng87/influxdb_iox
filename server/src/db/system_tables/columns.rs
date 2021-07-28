@@ -1,17 +1,16 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use arrow::array::{ArrayRef, StringBuilder, UInt32Builder, UInt64Builder};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::error::Result;
-use arrow::record_batch::RecordBatch;
-
-use data_types::chunk_metadata::DetailedChunkSummary;
-use data_types::error::ErrorLogger;
-use data_types::partition_metadata::{PartitionSummary, TableSummary};
-
-use crate::db::catalog::Catalog;
-use crate::db::system_tables::IoxSystemTable;
+use crate::db::{catalog::Catalog, system_tables::IoxSystemTable};
+use arrow::{
+    array::{ArrayRef, StringBuilder, UInt32Builder, UInt64Builder},
+    datatypes::{DataType, Field, Schema, SchemaRef},
+    error::Result,
+    record_batch::RecordBatch,
+};
+use data_types::{
+    chunk_metadata::DetailedChunkSummary,
+    error::ErrorLogger,
+    partition_metadata::{PartitionSummary, TableSummary},
+};
+use std::{collections::HashMap, sync::Arc};
 
 /// Implementation of `system.columns` system table
 #[derive(Debug)]
@@ -127,6 +126,7 @@ fn chunk_columns_schema() -> SchemaRef {
         Field::new("column_name", DataType::Utf8, false),
         Field::new("storage", DataType::Utf8, false),
         Field::new("row_count", DataType::UInt64, true),
+        Field::new("null_count", DataType::UInt64, true),
         Field::new("min_value", DataType::Utf8, true),
         Field::new("max_value", DataType::Utf8, true),
         Field::new("memory_bytes", DataType::UInt64, true),
@@ -160,6 +160,7 @@ fn assemble_chunk_columns(
     let mut column_name = StringBuilder::new(row_estimate);
     let mut storage = StringBuilder::new(row_estimate);
     let mut row_count = UInt64Builder::new(row_estimate);
+    let mut null_count = UInt64Builder::new(row_estimate);
     let mut min_values = StringBuilder::new(row_estimate);
     let mut max_values = StringBuilder::new(row_estimate);
     let mut memory_bytes = UInt64Builder::new(row_estimate);
@@ -177,7 +178,8 @@ fn assemble_chunk_columns(
             table_name.append_value(&chunk_summary.inner.table_name)?;
             column_name.append_value(&column.name)?;
             storage.append_value(storage_value)?;
-            row_count.append_value(column.count())?;
+            row_count.append_value(column.total_count())?;
+            null_count.append_value(column.null_count())?;
             if let Some(v) = column.stats.min_as_str() {
                 min_values.append_value(v)?;
             } else {
@@ -204,6 +206,7 @@ fn assemble_chunk_columns(
             Arc::new(column_name.finish()),
             Arc::new(storage.finish()),
             Arc::new(row_count.finish()),
+            Arc::new(null_count.finish()),
             Arc::new(min_values.finish()),
             Arc::new(max_values.finish()),
             Arc::new(memory_bytes.finish()),
@@ -213,11 +216,13 @@ fn assemble_chunk_columns(
 
 #[cfg(test)]
 mod tests {
-    use arrow_util::assert_batches_eq;
-    use data_types::chunk_metadata::{ChunkColumnSummary, ChunkStorage, ChunkSummary};
-    use data_types::partition_metadata::{ColumnSummary, InfluxDbType, StatValues, Statistics};
-
     use super::*;
+    use arrow_util::assert_batches_eq;
+    use chrono::{TimeZone, Utc};
+    use data_types::{
+        chunk_metadata::{ChunkColumnSummary, ChunkStorage, ChunkSummary},
+        partition_metadata::{ColumnSummary, InfluxDbType, StatValues, Statistics},
+    };
 
     #[test]
     fn test_from_partition_summaries() {
@@ -292,12 +297,13 @@ mod tests {
                                 Some("bar".to_string()),
                                 Some("foo".to_string()),
                                 55,
+                                0,
                             )),
                         },
                         ColumnSummary {
                             name: "c2".to_string(),
                             influxdb_type: Some(InfluxDbType::Field),
-                            stats: Statistics::F64(StatValues::new(Some(11.0), Some(43.0), 66)),
+                            stats: Statistics::F64(StatValues::new(Some(11.0), Some(43.0), 66, 0)),
                         },
                     ],
                 }),
@@ -312,8 +318,8 @@ mod tests {
                         object_store_bytes: 0,
                         row_count: 11,
                         time_of_last_access: None,
-                        time_of_first_write: None,
-                        time_of_last_write: None,
+                        time_of_first_write: Utc.timestamp_nanos(1),
+                        time_of_last_write: Utc.timestamp_nanos(2),
                         time_closed: None,
                     },
                     columns: vec![
@@ -334,7 +340,7 @@ mod tests {
                     columns: vec![ColumnSummary {
                         name: "c1".to_string(),
                         influxdb_type: Some(InfluxDbType::Field),
-                        stats: Statistics::F64(StatValues::new(Some(110.0), Some(430.0), 667)),
+                        stats: Statistics::F64(StatValues::new(Some(110.0), Some(430.0), 667, 99)),
                     }],
                 }),
                 DetailedChunkSummary {
@@ -348,8 +354,8 @@ mod tests {
                         object_store_bytes: 0,
                         row_count: 11,
                         time_of_last_access: None,
-                        time_of_first_write: None,
-                        time_of_last_write: None,
+                        time_of_first_write: Utc.timestamp_nanos(1),
+                        time_of_last_write: Utc.timestamp_nanos(2),
                         time_closed: None,
                     },
                     columns: vec![ChunkColumnSummary {
@@ -364,7 +370,7 @@ mod tests {
                     columns: vec![ColumnSummary {
                         name: "c3".to_string(),
                         influxdb_type: Some(InfluxDbType::Field),
-                        stats: Statistics::F64(StatValues::new(Some(-1.0), Some(2.0), 4)),
+                        stats: Statistics::F64(StatValues::new(Some(-1.0), Some(2.0), 4, 0)),
                     }],
                 }),
                 DetailedChunkSummary {
@@ -378,8 +384,8 @@ mod tests {
                         object_store_bytes: 0,
                         row_count: 11,
                         time_of_last_access: None,
-                        time_of_first_write: None,
-                        time_of_last_write: None,
+                        time_of_first_write: Utc.timestamp_nanos(1),
+                        time_of_last_write: Utc.timestamp_nanos(2),
                         time_closed: None,
                     },
                     columns: vec![ChunkColumnSummary {
@@ -391,14 +397,14 @@ mod tests {
         ];
 
         let expected = vec![
-            "+---------------+----------+------------+-------------+-------------------+-----------+-----------+-----------+--------------+",
-            "| partition_key | chunk_id | table_name | column_name | storage           | row_count | min_value | max_value | memory_bytes |",
-            "+---------------+----------+------------+-------------+-------------------+-----------+-----------+-----------+--------------+",
-            "| p1            | 42       | t1         | c1          | ReadBuffer        | 55        | bar       | foo       | 11           |",
-            "| p1            | 42       | t1         | c2          | ReadBuffer        | 66        | 11        | 43        | 12           |",
-            "| p2            | 43       | t1         | c1          | OpenMutableBuffer | 667       | 110       | 430       | 100          |",
-            "| p2            | 44       | t2         | c3          | OpenMutableBuffer | 4         | -1        | 2         | 200          |",
-            "+---------------+----------+------------+-------------+-------------------+-----------+-----------+-----------+--------------+",
+            "+---------------+----------+------------+-------------+-------------------+-----------+------------+-----------+-----------+--------------+",
+            "| partition_key | chunk_id | table_name | column_name | storage           | row_count | null_count | min_value | max_value | memory_bytes |",
+            "+---------------+----------+------------+-------------+-------------------+-----------+------------+-----------+-----------+--------------+",
+            "| p1            | 42       | t1         | c1          | ReadBuffer        | 55        | 0          | bar       | foo       | 11           |",
+            "| p1            | 42       | t1         | c2          | ReadBuffer        | 66        | 0          | 11        | 43        | 12           |",
+            "| p2            | 43       | t1         | c1          | OpenMutableBuffer | 667       | 99         | 110       | 430       | 100          |",
+            "| p2            | 44       | t2         | c3          | OpenMutableBuffer | 4         | 0          | -1        | 2         | 200          |",
+            "+---------------+----------+------------+-------------+-------------------+-----------+------------+-----------+-----------+--------------+",
         ];
 
         let batch = assemble_chunk_columns(chunk_columns_schema(), summaries).unwrap();

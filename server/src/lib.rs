@@ -80,7 +80,7 @@ use snafu::{OptionExt, ResultExt, Snafu};
 
 use data_types::{
     database_rules::{
-        DatabaseRules, NodeGroup, RoutingRules, Shard, ShardConfig, ShardId, WriteBufferConnection,
+        DatabaseRules, NodeGroup, RoutingRules, ShardId, Sink, WriteBufferConnection,
     },
     database_state::DatabaseStateCode,
     job::Job,
@@ -100,6 +100,7 @@ use write_buffer::config::WriteBufferConfig;
 pub use crate::config::RemoteTemplate;
 use crate::config::{object_store_path_for_database_config, Config, GRpcConnectionString};
 use cache_loader_async::cache_api::LoadingCache;
+use data_types::database_rules::ShardConfig;
 pub use db::Db;
 use generated_types::database_rules::encode_database_rules;
 use influxdb_iox_client::{connection::Builder, write};
@@ -635,7 +636,7 @@ where
         db_reservation.advance_rules_loaded(rules.clone())?;
 
         // load preserved catalog
-        let (preserved_catalog, catalog) = create_preserved_catalog(
+        let (preserved_catalog, catalog, replay_plan) = create_preserved_catalog(
             rules.db_name(),
             Arc::clone(&self.store),
             config.server_id(),
@@ -652,7 +653,7 @@ where
                 source: e,
             })?;
         info!(write_buffer_enabled=?write_buffer.is_some(), db_name=rules.db_name(), "write buffer config");
-        db_reservation.advance_replay(preserved_catalog, catalog, write_buffer)?;
+        db_reservation.advance_replay(preserved_catalog, catalog, replay_plan, write_buffer)?;
 
         // no actual replay required
         db_reservation.advance_init()?;
@@ -790,16 +791,15 @@ where
                     &*rules,
                 )
                 .context(LineConversion)?;
-                Some((routing_config.target.clone(), sharded_entries))
+                Some((routing_config.sink.clone(), sharded_entries))
             } else {
                 None
             }
         };
 
-        if let Some((target, sharded_entries)) = routing_config_target {
+        if let Some((sink, sharded_entries)) = routing_config_target {
             for i in sharded_entries {
-                self.write_entry_downstream(&db_name, &target, i.entry)
-                    .await?;
+                self.write_entry_sink(&db_name, &db, &sink, i.entry).await?;
             }
             return Ok(());
         }
@@ -814,7 +814,7 @@ where
             let rules = db.rules();
 
             let shard_config = rules.routing_rules.as_ref().map(|cfg| match cfg {
-                RoutingRules::RoutingConfig(_) => todo!("routing config"),
+                RoutingRules::RoutingConfig(_) => unreachable!("routing config handled above"),
                 RoutingRules::ShardConfig(shard_config) => shard_config,
             });
 
@@ -848,18 +848,14 @@ where
         &self,
         db_name: &str,
         db: &Db,
-        shards: Arc<HashMap<u32, Shard>>,
+        shards: Arc<HashMap<u32, Sink>>,
         sharded_entry: ShardedEntry,
     ) -> Result<()> {
         match sharded_entry.shard_id {
             Some(shard_id) => {
-                let shard = shards.get(&shard_id).context(ShardNotFound { shard_id })?;
-                match shard {
-                    Shard::Iox(node_group) => {
-                        self.write_entry_downstream(db_name, node_group, sharded_entry.entry)
-                            .await?
-                    }
-                }
+                let sink = shards.get(&shard_id).context(ShardNotFound { shard_id })?;
+                self.write_entry_sink(db_name, db, sink, sharded_entry.entry)
+                    .await?
             }
             None => {
                 self.write_entry_local(&db_name, db, sharded_entry.entry)
@@ -867,6 +863,31 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn write_entry_sink(
+        &self,
+        db_name: &str,
+        db: &Db,
+        sink: &Sink,
+        entry: Entry,
+    ) -> Result<()> {
+        match sink {
+            Sink::Iox(node_group) => {
+                self.write_entry_downstream(db_name, node_group, entry)
+                    .await
+            }
+            Sink::Kafka(_) => {
+                // The write buffer write path is currently implemented in "db", so confusingly we
+                // need to invoke write_entry_local.
+                // TODO(mkm): tracked in #2134
+                self.write_entry_local(db_name, db, entry).await
+            }
+            Sink::DevNull => {
+                // write is silently ignored, as requested by the configuration.
+                Ok(())
+            }
+        }
     }
 
     async fn write_entry_downstream(
@@ -1627,11 +1648,11 @@ mod tests {
         let batches = run_query(db, "select * from cpu").await;
 
         let expected = vec![
-            "+-----+-------------------------------+",
-            "| bar | time                          |",
-            "+-----+-------------------------------+",
-            "| 1   | 1970-01-01 00:00:00.000000010 |",
-            "+-----+-------------------------------+",
+            "+-----+--------------------------------+",
+            "| bar | time                           |",
+            "+-----+--------------------------------+",
+            "| 1   | 1970-01-01T00:00:00.000000010Z |",
+            "+-----+--------------------------------+",
         ];
         assert_batches_eq!(expected, &batches);
     }
@@ -1672,11 +1693,11 @@ mod tests {
 
         let batches = run_query(db, "select * from cpu").await;
         let expected = vec![
-            "+-----+-------------------------------+",
-            "| bar | time                          |",
-            "+-----+-------------------------------+",
-            "| 1   | 1970-01-01 00:00:00.000000010 |",
-            "+-----+-------------------------------+",
+            "+-----+--------------------------------+",
+            "| bar | time                           |",
+            "+-----+--------------------------------+",
+            "| 1   | 1970-01-01T00:00:00.000000010Z |",
+            "+-----+--------------------------------+",
         ];
         assert_batches_eq!(expected, &batches);
 
@@ -1741,7 +1762,7 @@ mod tests {
                     ..Default::default()
                 }),
                 shards: Arc::new(
-                    vec![(TEST_SHARD_ID, Shard::Iox(remote_ids.clone()))]
+                    vec![(TEST_SHARD_ID, Sink::Iox(remote_ids.clone()))]
                         .into_iter()
                         .collect(),
                 ),

@@ -11,8 +11,8 @@ use entry::{
 };
 use generated_types::influxdata::iox::management::v1::database_rules::RoutingRules;
 use generated_types::influxdata::iox::management::v1::{
-    node_group::Node, shard, HashRing, Matcher, MatcherToShard, NodeGroup, RoutingConfig, Shard,
-    ShardConfig,
+    node_group::Node, sink, HashRing, Matcher, MatcherToShard, NodeGroup, RoutingConfig,
+    ShardConfig, Sink,
 };
 use influxdb_line_protocol::parse_lines;
 use std::collections::HashMap;
@@ -116,12 +116,12 @@ async fn test_write_entry() {
     }
 
     let expected = vec![
-        "+-----+-------------------------------+",
-        "| bar | time                          |",
-        "+-----+-------------------------------+",
-        "| 1   | 1970-01-01 00:00:00.000000010 |",
-        "| 2   | 1970-01-01 00:00:00.000000020 |",
-        "+-----+-------------------------------+",
+        "+-----+--------------------------------+",
+        "| bar | time                           |",
+        "+-----+--------------------------------+",
+        "| 1   | 1970-01-01T00:00:00.000000010Z |",
+        "| 2   | 1970-01-01T00:00:00.000000020Z |",
+        "+-----+--------------------------------+",
     ];
     assert_batches_sorted_eq!(&expected, &batches);
 }
@@ -225,8 +225,8 @@ async fn test_write_routed() {
         shards: vec![
             (
                 TEST_SHARD_ID_1,
-                Shard {
-                    sink: Some(shard::Sink::Iox(NodeGroup {
+                Sink {
+                    sink: Some(sink::Sink::Iox(NodeGroup {
                         nodes: vec![Node {
                             id: TEST_REMOTE_ID_1,
                         }],
@@ -235,8 +235,8 @@ async fn test_write_routed() {
             ),
             (
                 TEST_SHARD_ID_2,
-                Shard {
-                    sink: Some(shard::Sink::Iox(NodeGroup {
+                Sink {
+                    sink: Some(sink::Sink::Iox(NodeGroup {
                         nodes: vec![Node {
                             id: TEST_REMOTE_ID_2,
                         }],
@@ -245,8 +245,8 @@ async fn test_write_routed() {
             ),
             (
                 TEST_SHARD_ID_3,
-                Shard {
-                    sink: Some(shard::Sink::Iox(NodeGroup {
+                Sink {
+                    sink: Some(sink::Sink::Iox(NodeGroup {
                         nodes: vec![Node {
                             id: TEST_REMOTE_ID_3,
                         }],
@@ -298,12 +298,12 @@ async fn test_write_routed() {
     }
 
     let expected = vec![
-        "+-----+-------------------------------+",
-        "| bar | time                          |",
-        "+-----+-------------------------------+",
-        "| 1   | 1970-01-01 00:00:00.000000100 |",
-        "| 2   | 1970-01-01 00:00:00.000000200 |",
-        "+-----+-------------------------------+",
+        "+-----+--------------------------------+",
+        "| bar | time                           |",
+        "+-----+--------------------------------+",
+        "| 1   | 1970-01-01T00:00:00.000000100Z |",
+        "| 2   | 1970-01-01T00:00:00.000000200Z |",
+        "+-----+--------------------------------+",
     ];
     assert_batches_sorted_eq!(&expected, &batches);
 
@@ -327,11 +327,11 @@ async fn test_write_routed() {
     }
 
     let expected = vec![
-        "+-----+-------------------------------+",
-        "| bar | time                          |",
-        "+-----+-------------------------------+",
-        "| 3   | 1970-01-01 00:00:00.000000300 |",
-        "+-----+-------------------------------+",
+        "+-----+--------------------------------+",
+        "| bar | time                           |",
+        "+-----+--------------------------------+",
+        "| 3   | 1970-01-01T00:00:00.000000300Z |",
+        "+-----+--------------------------------+",
     ];
     assert_batches_sorted_eq!(&expected, &batches);
 
@@ -357,11 +357,11 @@ async fn test_write_routed() {
     }
 
     let expected = vec![
-        "+-----+-------------------------------+",
-        "| baz | time                          |",
-        "+-----+-------------------------------+",
-        "| 4   | 1970-01-01 00:00:00.000000400 |",
-        "+-----+-------------------------------+",
+        "+-----+--------------------------------+",
+        "| baz | time                           |",
+        "+-----+--------------------------------+",
+        "| 4   | 1970-01-01T00:00:00.000000400Z |",
+        "+-----+--------------------------------+",
     ];
     assert_batches_sorted_eq!(&expected, &batches);
 }
@@ -398,8 +398,8 @@ async fn test_write_routed_errors() {
         }],
         shards: vec![(
             TEST_SHARD_ID,
-            Shard {
-                sink: Some(shard::Sink::Iox(NodeGroup {
+            Sink {
+                sink: Some(sink::Sink::Iox(NodeGroup {
                     nodes: vec![Node { id: TEST_REMOTE_ID }],
                 })),
             },
@@ -434,6 +434,72 @@ async fn test_write_routed_errors() {
 
     // TODO(mkm): check connection error and successful communication with a
     // target that replies with an error...
+}
+
+#[tokio::test]
+async fn test_write_dev_null() {
+    const TEST_ROUTER_ID: u32 = 1;
+    const TEST_SHARD_ID: u32 = 42;
+
+    let router = ServerFixture::create_single_use().await;
+    let mut router_mgmt = router.management_client();
+    router_mgmt
+        .update_server_id(TEST_ROUTER_ID)
+        .await
+        .expect("set ID failed");
+    router.wait_server_initialized().await;
+
+    let db_name = rand_name();
+    create_readable_database(&db_name, router.grpc_channel()).await;
+
+    // Set sharding rules on the router:
+    let mut router_db_rules = router_mgmt
+        .get_database(&db_name)
+        .await
+        .expect("cannot get database on router");
+    let shard_config = ShardConfig {
+        specific_targets: vec![MatcherToShard {
+            matcher: Some(Matcher {
+                table_name_regex: "^cpu$".to_string(),
+                ..Default::default()
+            }),
+            shard: TEST_SHARD_ID,
+        }],
+        shards: vec![(
+            TEST_SHARD_ID,
+            Sink {
+                sink: Some(sink::Sink::DevNull(Default::default())),
+            },
+        )]
+        .into_iter()
+        .collect::<HashMap<_, _>>(),
+        ..Default::default()
+    };
+    router_db_rules.routing_rules = Some(RoutingRules::ShardConfig(shard_config));
+    router_mgmt
+        .update_database(router_db_rules)
+        .await
+        .expect("cannot update router db rules");
+
+    // Rows matching a shard directed to "/dev/null" are silently ignored
+    let mut write_client = router.write_client();
+    let lp_lines = vec!["cpu bar=1 100", "cpu bar=2 200"];
+    write_client
+        .write(&db_name, lp_lines.join("\n"))
+        .await
+        .expect("dev null eats them all");
+
+    // Rows not matching that shard won't be send to "/dev/null".
+    let lp_lines = vec!["mem bar=1 1", "mem bar=2 2"];
+    let err = write_client
+        .write(&db_name, lp_lines.join("\n"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "Unexpected server error: Internal error: Internal Error"
+    );
 }
 
 #[tokio::test]
@@ -514,8 +580,10 @@ async fn test_write_routed_no_shard() {
             .await
             .expect("cannot get database on router");
         let routing_config = RoutingConfig {
-            target: Some(NodeGroup {
-                nodes: vec![Node { id: *remote_id }],
+            sink: Some(Sink {
+                sink: Some(sink::Sink::Iox(NodeGroup {
+                    nodes: vec![Node { id: *remote_id }],
+                })),
             }),
         };
         router_db_rules.routing_rules = Some(RoutingRules::RoutingConfig(routing_config));
@@ -557,11 +625,11 @@ async fn test_write_routed_no_shard() {
     }
 
     let expected = vec![
-        "+-----+-------------------------------+",
-        "| bar | time                          |",
-        "+-----+-------------------------------+",
-        "| 1   | 1970-01-01 00:00:00.000000100 |",
-        "+-----+-------------------------------+",
+        "+-----+--------------------------------+",
+        "| bar | time                           |",
+        "+-----+--------------------------------+",
+        "| 1   | 1970-01-01T00:00:00.000000100Z |",
+        "+-----+--------------------------------+",
     ];
     assert_batches_sorted_eq!(&expected, &batches);
 
@@ -585,11 +653,11 @@ async fn test_write_routed_no_shard() {
     }
 
     let expected = vec![
-        "+-----+-------------------------------+",
-        "| bar | time                          |",
-        "+-----+-------------------------------+",
-        "| 2   | 1970-01-01 00:00:00.000000100 |",
-        "+-----+-------------------------------+",
+        "+-----+--------------------------------+",
+        "| bar | time                           |",
+        "+-----+--------------------------------+",
+        "| 2   | 1970-01-01T00:00:00.000000100Z |",
+        "+-----+--------------------------------+",
     ];
     assert_batches_sorted_eq!(&expected, &batches);
 

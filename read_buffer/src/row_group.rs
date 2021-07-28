@@ -86,6 +86,7 @@ impl RowGroup {
                         schema::ColumnType::Tag(name.clone()),
                         c.logical_datatype(),
                         c.column_range(),
+                        c.storage_stats().nulls,
                         c.cardinality(),
                     );
 
@@ -101,6 +102,7 @@ impl RowGroup {
                         schema::ColumnType::Field(name.clone()),
                         c.logical_datatype(),
                         c.column_range(),
+                        c.storage_stats().nulls,
                         c.cardinality(),
                     );
                     all_columns_by_name.insert(name.clone(), all_columns.len());
@@ -115,6 +117,7 @@ impl RowGroup {
                         schema::ColumnType::Timestamp(name.clone()),
                         c.logical_datatype(),
                         c.column_range(),
+                        c.storage_stats().nulls,
                         c.cardinality(),
                     );
 
@@ -1497,6 +1500,8 @@ pub struct ColumnMeta {
     pub typ: crate::schema::ColumnType,
     pub logical_data_type: LogicalDataType,
     pub range: (OwnedValue, OwnedValue),
+    /// How many values in this column are nulls
+    pub null_count: u32,
     pub distinct_count: Option<NonZeroU64>,
 }
 
@@ -1627,6 +1632,7 @@ impl MetaData {
         col_type: schema::ColumnType,
         logical_data_type: LogicalDataType,
         range: (OwnedValue, OwnedValue),
+        null_count: u32,
         distinct_count: Option<NonZeroU64>,
     ) {
         println!(
@@ -1641,6 +1647,7 @@ impl MetaData {
                 typ: col_type,
                 logical_data_type,
                 range,
+                null_count,
                 distinct_count,
             },
         );
@@ -3288,6 +3295,7 @@ west,host-c,pro,10,6
                 OwnedValue::String("west".to_owned()),
             ),
             distinct_count: Some(NonZeroU64::new(233).unwrap()),
+            null_count: 0,
         };
 
         let col2 = ColumnMeta {
@@ -3298,6 +3306,7 @@ west,host-c,pro,10,6
                 OwnedValue::String("west".to_owned()),
             ),
             distinct_count: Some(NonZeroU64::new(233).unwrap()),
+            null_count: 0,
         };
 
         let col3 = ColumnMeta {
@@ -3308,6 +3317,7 @@ west,host-c,pro,10,6
                 OwnedValue::String("west".to_owned()),
             ),
             distinct_count: None,
+            null_count: 1,
         };
 
         assert_eq!(col1, col2);

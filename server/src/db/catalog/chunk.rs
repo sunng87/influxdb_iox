@@ -1,15 +1,15 @@
-use crate::db::catalog::metrics::StorageGauge;
+use crate::db::catalog::metrics::{StorageGauge, TimestampHistogram};
 use chrono::{DateTime, Utc};
-use data_types::instant::to_approximate_datetime;
 use data_types::{
     chunk_metadata::{
         ChunkAddr, ChunkColumnSummary, ChunkLifecycleAction, ChunkStorage, ChunkSummary,
         DetailedChunkSummary,
     },
+    instant::to_approximate_datetime,
     partition_metadata::TableSummary,
+    write_summary::TimestampSummary,
 };
-use internal_types::access::AccessRecorder;
-use internal_types::schema::Schema;
+use internal_types::{access::AccessRecorder, schema::Schema};
 use metrics::{Counter, Histogram, KeyValue};
 use mutable_buffer::chunk::{snapshot::ChunkSnapshot as MBChunkSnapshot, MBChunk};
 use observability_deps::tracing::debug;
@@ -200,12 +200,12 @@ pub struct CatalogChunk {
     /// The earliest time at which data contained within this chunk was written
     /// into IOx. Note due to the compaction, etc... this may not be the chunk
     /// that data was originally written into
-    time_of_first_write: Option<DateTime<Utc>>,
+    time_of_first_write: DateTime<Utc>,
 
     /// The latest time at which data contained within this chunk was written
     /// into IOx. Note due to the compaction, etc... this may not be the chunk
     /// that data was originally written into
-    time_of_last_write: Option<DateTime<Utc>>,
+    time_of_last_write: DateTime<Utc>,
 
     /// Time at which this chunk was marked as closed. Note this is
     /// not the same as the timestamps on the data itself
@@ -236,6 +236,9 @@ pub struct ChunkMetrics {
 
     /// Catalog memory metrics
     pub(super) memory_metrics: StorageGauge,
+
+    /// Track ingested timestamps
+    pub(super) timestamp_histogram: TimestampHistogram,
 }
 
 impl ChunkMetrics {
@@ -250,6 +253,7 @@ impl ChunkMetrics {
             chunk_storage: StorageGauge::new_unregistered(),
             row_count: StorageGauge::new_unregistered(),
             memory_metrics: StorageGauge::new_unregistered(),
+            timestamp_histogram: Default::default(),
         }
     }
 }
@@ -265,8 +269,9 @@ impl CatalogChunk {
     ) -> Self {
         assert_eq!(chunk.table_name(), &addr.table_name);
 
-        let first_write = chunk.table_summary().time_of_first_write;
-        let last_write = chunk.table_summary().time_of_last_write;
+        let summary = chunk.table_summary();
+        let time_of_first_write = summary.time_of_first_write;
+        let time_of_last_write = summary.time_of_last_write;
 
         let stage = ChunkStage::Open { mb_chunk: chunk };
 
@@ -280,8 +285,8 @@ impl CatalogChunk {
             lifecycle_action: None,
             metrics,
             access_recorder: Default::default(),
-            time_of_first_write: Some(first_write),
-            time_of_last_write: Some(last_write),
+            time_of_first_write,
+            time_of_last_write,
             time_closed: None,
         };
         chunk.update_metrics();
@@ -298,10 +303,12 @@ impl CatalogChunk {
         metrics: ChunkMetrics,
     ) -> Self {
         let summary = chunk.table_summary();
+        let time_of_first_write = summary.time_of_first_write;
+        let time_of_last_write = summary.time_of_last_write;
 
         let stage = ChunkStage::Frozen {
             meta: Arc::new(ChunkMetadata {
-                table_summary: Arc::new(summary),
+                table_summary: Arc::new(summary.into()),
                 schema,
             }),
             representation: ChunkStageFrozenRepr::ReadBuffer(Arc::new(chunk)),
@@ -317,8 +324,8 @@ impl CatalogChunk {
             lifecycle_action: None,
             metrics,
             access_recorder: Default::default(),
-            time_of_first_write: None,
-            time_of_last_write: None,
+            time_of_first_write,
+            time_of_last_write,
             time_closed: None,
         };
         chunk.update_metrics();
@@ -334,9 +341,19 @@ impl CatalogChunk {
     ) -> Self {
         assert_eq!(chunk.table_name(), addr.table_name.as_ref());
 
+        let summary = chunk.table_summary();
+        let time_of_first_write = summary.time_of_first_write;
+        let time_of_last_write = summary.time_of_last_write;
+
+        // this is temporary
+        let table_summary = TableSummary {
+            name: summary.name.clone(),
+            columns: summary.columns.clone(),
+        };
+
         // Cache table summary + schema
         let meta = Arc::new(ChunkMetadata {
-            table_summary: Arc::clone(chunk.table_summary()),
+            table_summary: Arc::new(table_summary),
             schema: chunk.schema(),
         });
 
@@ -352,8 +369,8 @@ impl CatalogChunk {
             lifecycle_action: None,
             metrics,
             access_recorder: Default::default(),
-            time_of_first_write: None,
-            time_of_last_write: None,
+            time_of_first_write,
+            time_of_last_write,
             time_closed: None,
         };
         chunk.update_metrics();
@@ -395,11 +412,11 @@ impl CatalogChunk {
             .map_or(false, |action| action.metadata() == &lifecycle_action)
     }
 
-    pub fn time_of_first_write(&self) -> Option<DateTime<Utc>> {
+    pub fn time_of_first_write(&self) -> DateTime<Utc> {
         self.time_of_first_write
     }
 
-    pub fn time_of_last_write(&self) -> Option<DateTime<Utc>> {
+    pub fn time_of_last_write(&self) -> DateTime<Utc> {
         self.time_of_last_write
     }
 
@@ -455,13 +472,18 @@ impl CatalogChunk {
     }
 
     /// Record a write of row data to this chunk
-    pub fn record_write(&mut self) {
-        let now = Utc::now();
+    ///
+    /// `time_of_write` is the wall clock time of the write
+    /// `timestamps` is a summary of the row timestamps contained in the write
+    pub fn record_write(&mut self, time_of_write: DateTime<Utc>, timestamps: &TimestampSummary) {
+        self.metrics.timestamp_histogram.add(timestamps);
         self.access_recorder.record_access_now();
-        if self.time_of_first_write.is_none() {
-            self.time_of_first_write = Some(now);
-        }
-        self.time_of_last_write = Some(now);
+
+        self.time_of_first_write = self.time_of_first_write.min(time_of_write);
+
+        // DateTime<Utc> isn't necessarily monotonic
+        self.time_of_last_write = self.time_of_last_write.max(time_of_write);
+
         self.update_metrics();
     }
 
@@ -861,7 +883,7 @@ impl CatalogChunk {
                 }
             }
             _ => {
-                unexpected_state!(self, "setting unload", "WrittenToObjectStore", &self.stage)
+                unexpected_state!(self, "setting unload", "Persisted", &self.stage)
             }
         }
     }
@@ -939,26 +961,22 @@ impl CatalogChunk {
 
 #[cfg(test)]
 mod tests {
-    use entry::{test_helpers::lp_to_entry, Sequence};
+    use super::*;
+    use entry::test_helpers::lp_to_entry;
     use mutable_buffer::chunk::{ChunkMetrics as MBChunkMetrics, MBChunk};
     use parquet_file::{
         chunk::ParquetChunk,
         test_utils::{make_chunk as make_parquet_chunk_with_store, make_object_store},
     };
 
-    use super::*;
-
     #[test]
     fn test_new_open() {
-        let sequencer_id = 1;
         let addr = chunk_addr();
 
         // works with non-empty MBChunk
-        let mb_chunk = make_mb_chunk(&addr.table_name, sequencer_id);
+        let mb_chunk = make_mb_chunk(&addr.table_name);
         let chunk = CatalogChunk::new_open(addr, mb_chunk, ChunkMetrics::new_unregistered());
         assert!(matches!(chunk.stage(), &ChunkStage::Open { .. }));
-        assert!(chunk.time_of_first_write.is_some());
-        assert!(chunk.time_of_last_write.is_some());
     }
 
     #[tokio::test]
@@ -1110,13 +1128,13 @@ mod tests {
         chunk.clear_lifecycle_action().unwrap();
     }
 
-    fn make_mb_chunk(table_name: &str, sequencer_id: u32) -> MBChunk {
+    fn make_mb_chunk(table_name: &str) -> MBChunk {
         let entry = lp_to_entry(&format!("{} bar=1 10", table_name));
+        let time_of_write = Utc::now();
         let write = entry.partition_writes().unwrap().remove(0);
         let batch = write.table_batches().remove(0);
-        let sequence = Some(Sequence::new(sequencer_id, 1));
 
-        MBChunk::new(MBChunkMetrics::new_unregistered(), sequence.as_ref(), batch).unwrap()
+        MBChunk::new(MBChunkMetrics::new_unregistered(), batch, time_of_write).unwrap()
     }
 
     async fn make_parquet_chunk(addr: ChunkAddr) -> ParquetChunk {
@@ -1134,11 +1152,10 @@ mod tests {
     }
 
     fn make_open_chunk() -> CatalogChunk {
-        let sequencer_id = 1;
         let addr = chunk_addr();
 
         // assemble MBChunk
-        let mb_chunk = make_mb_chunk(&addr.table_name, sequencer_id);
+        let mb_chunk = make_mb_chunk(&addr.table_name);
 
         CatalogChunk::new_open(addr, mb_chunk, ChunkMetrics::new_unregistered())
     }

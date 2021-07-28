@@ -1,40 +1,39 @@
-use std::fmt::Display;
-use std::sync::Arc;
-use std::time::Instant;
-
-use chrono::{DateTime, TimeZone, Utc};
-
+use super::DbChunk;
+use crate::{
+    db::catalog::{chunk::CatalogChunk, partition::Partition},
+    Db,
+};
 use ::lifecycle::LifecycleDb;
-use data_types::chunk_metadata::{ChunkAddr, ChunkLifecycleAction, ChunkStorage};
-use data_types::database_rules::LifecycleRules;
-use data_types::error::ErrorLogger;
-use data_types::job::Job;
-use data_types::partition_metadata::Statistics;
-use data_types::DatabaseName;
+use chrono::{DateTime, TimeZone, Utc};
+use data_types::{
+    chunk_metadata::{ChunkAddr, ChunkLifecycleAction, ChunkStorage},
+    database_rules::LifecycleRules,
+    error::ErrorLogger,
+    job::Job,
+    partition_metadata::Statistics,
+    DatabaseName,
+};
 use datafusion::physical_plan::SendableRecordBatchStream;
-use internal_types::schema::merge::SchemaMerger;
-use internal_types::schema::{Schema, TIME_COLUMN_NAME};
+use internal_types::{
+    access::AccessMetrics,
+    schema::{merge::SchemaMerger, Schema, TIME_COLUMN_NAME},
+};
 use lifecycle::{
     LifecycleChunk, LifecyclePartition, LifecycleReadGuard, LifecycleWriteGuard, LockableChunk,
     LockablePartition,
 };
 use observability_deps::tracing::{info, trace};
+use persistence_windows::persistence_windows::FlushHandle;
 use query::QueryChunkMeta;
+use std::{fmt::Display, sync::Arc, time::Instant};
 use tracker::{RwLock, TaskTracker};
-
-use crate::db::catalog::chunk::CatalogChunk;
-use crate::db::catalog::partition::Partition;
-use crate::Db;
 
 pub(crate) use compact::compact_chunks;
 pub(crate) use drop::drop_chunk;
 pub(crate) use error::{Error, Result};
 pub(crate) use move_chunk::move_chunk_to_read_buffer;
 pub(crate) use persist::persist_chunks;
-use persistence_windows::persistence_windows::FlushHandle;
 pub(crate) use unload::unload_read_buffer_chunk;
-
-use super::DbChunk;
 
 mod compact;
 mod drop;
@@ -291,26 +290,6 @@ impl LifecycleChunk for CatalogChunk {
             .expect("failed to clear lifecycle action")
     }
 
-    fn time_of_first_write(&self) -> Option<DateTime<Utc>> {
-        self.time_of_first_write()
-    }
-
-    fn time_of_last_write(&self) -> Option<DateTime<Utc>> {
-        self.time_of_last_write()
-    }
-
-    fn addr(&self) -> &ChunkAddr {
-        self.addr()
-    }
-
-    fn storage(&self) -> ChunkStorage {
-        self.storage().1
-    }
-
-    fn row_count(&self) -> usize {
-        self.storage().0
-    }
-
     fn min_timestamp(&self) -> DateTime<Utc> {
         let table_summary = self.table_summary();
         let col = table_summary
@@ -326,40 +305,73 @@ impl LifecycleChunk for CatalogChunk {
 
         Utc.timestamp_nanos(min)
     }
-}
 
-/// Creates a new RUB chunk
-fn new_rub_chunk(db: &Db, table_name: &str) -> read_buffer::RBChunk {
-    // create a new read buffer chunk with memory tracking
-    let metrics = db
-        .metrics_registry
-        .register_domain_with_labels("read_buffer", db.metric_labels.clone());
+    fn access_metrics(&self) -> AccessMetrics {
+        self.access_recorder().get_metrics()
+    }
 
-    read_buffer::RBChunk::new(table_name, read_buffer::ChunkMetrics::new(&metrics))
+    fn time_of_last_write(&self) -> DateTime<Utc> {
+        self.time_of_last_write()
+    }
+
+    fn addr(&self) -> &ChunkAddr {
+        self.addr()
+    }
+
+    fn storage(&self) -> ChunkStorage {
+        self.storage().1
+    }
+
+    fn row_count(&self) -> usize {
+        self.storage().0
+    }
 }
 
 /// Executes a plan and collects the results into a read buffer chunk
-async fn collect_rub(
-    mut stream: SendableRecordBatchStream,
-    chunk: &mut read_buffer::RBChunk,
-) -> Result<()> {
-    use futures::StreamExt;
+// This is an async function but has been desugared manually because it's hitting
+// https://github.com/rust-lang/rust/issues/63033
+fn collect_rub(
+    stream: SendableRecordBatchStream,
+    db: &Db,
+    table_name: &str,
+    time_of_first_write: DateTime<Utc>,
+    time_of_last_write: DateTime<Utc>,
+) -> impl futures::Future<Output = Result<Option<read_buffer::RBChunk>>> {
+    use futures::{future, StreamExt, TryStreamExt};
 
     println!("     lifecycle::collect_rub");
-    let mut i = 0;
 
-    while let Some(batch) = stream.next().await {
-        let batch = batch?;
+    let table_name = table_name.to_string();
+    let metrics = db
+        .metrics_registry
+        .register_domain_with_labels("read_buffer", db.metric_labels.clone());
+    let chunk_metrics = read_buffer::ChunkMetrics::new(&metrics);
 
-        // println!("     ----- BATCH: {:#?}", batch);
-        i += 1;
+    async move {
+        let mut adapted_stream = stream.try_filter(|batch| future::ready(batch.num_rows() > 0));
 
-        if batch.num_rows() > 0 {
-            chunk.upsert_table(batch)
-        }
+        let first_batch = match adapted_stream.next().await {
+            Some(rb_result) => rb_result?,
+            // At least one RecordBatch is required to create a read_buffer::Chunk
+            None => return Ok(None),
+        };
+        let mut chunk = read_buffer::RBChunk::new(
+            table_name,
+            first_batch,
+            chunk_metrics,
+            time_of_first_write,
+            time_of_last_write,
+        );
+
+        adapted_stream
+            .try_for_each(|batch| {
+                chunk.upsert_table(batch);
+                future::ready(Ok(()))
+            })
+            .await?;
+
+        Ok(Some(chunk))
     }
-    println!("Total batches: {}", i);
-    Ok(())
 }
 
 /// Return the merged schema for the chunks that are being

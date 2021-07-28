@@ -8,10 +8,7 @@ use flatbuffers::{FlatBufferBuilder, Follow, ForwardsUOffset, Vector, VectorIter
 use ouroboros::self_referencing;
 use snafu::{OptionExt, ResultExt, Snafu};
 
-use data_types::{
-    database_rules::{Error as DataError, Partitioner, ShardId, Sharder},
-    server_id::ServerId,
-};
+use data_types::database_rules::{Error as DataError, Partitioner, ShardId, Sharder};
 use generated_types::influxdata::transfer::column::v1 as pb;
 use influxdb_line_protocol::{FieldValue, ParsedLine};
 use internal_types::schema::{
@@ -20,6 +17,7 @@ use internal_types::schema::{
 };
 
 use crate::entry_fb;
+use data_types::write_summary::TimestampSummary;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -844,7 +842,7 @@ impl<'a> TableBatch<'a> {
         }
     }
 
-    pub fn min_max_time(&self) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    fn timestamps(&self) -> Result<flatbuffers::Vector<'_, i64>> {
         match self
             .fb
             .columns()
@@ -862,14 +860,27 @@ impl<'a> TableBatch<'a> {
                     .context(TimeColumnWrongType)?
                     .values()
                     .expect("invalid flatbuffers: time column values must be present");
-
-                let min = vals.iter().min().context(TimeValueMissing)?;
-                let max = vals.iter().max().context(TimeValueMissing)?;
-
-                Ok((Utc.timestamp_nanos(min), Utc.timestamp_nanos(max)))
+                Ok(vals)
             }
             None => TimeColumnMissing.fail(),
         }
+    }
+
+    pub fn timestamp_summary(&self) -> Result<TimestampSummary> {
+        let timestamps = self.timestamps()?;
+        let mut summary = TimestampSummary::default();
+        for t in &timestamps {
+            summary.record(Utc.timestamp_nanos(t))
+        }
+        Ok(summary)
+    }
+
+    pub fn min_max_time(&self) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+        let timestamps = self.timestamps()?;
+        let min = timestamps.iter().min().context(TimeValueMissing)?;
+        let max = timestamps.iter().max().context(TimeValueMissing)?;
+
+        Ok((Utc.timestamp_nanos(min), Utc.timestamp_nanos(max)))
     }
 
     pub fn row_count(&self) -> usize {
@@ -929,6 +940,7 @@ impl<'a> TableBatch<'a> {
 #[derive(Debug)]
 pub struct Column<'a> {
     fb: entry_fb::Column<'a>,
+    /// Total number of rows, including null values
     pub row_count: usize,
 }
 
@@ -1708,21 +1720,16 @@ enum InnerClockValueError {
     ValueMayNotBeZero,
 }
 
-#[derive(Debug, Snafu)]
-pub enum SequencedEntryError {
-    #[snafu(display("{}", source))]
-    InvalidFlatbuffer {
-        source: flatbuffers::InvalidFlatbuffer,
-    },
-}
-
 #[derive(Debug, Clone)]
 pub struct SequencedEntry {
     entry: Entry,
-    /// The (optional) sequence for this entry.  At the time of
-    /// writing, sequences will not be present when there is no
-    /// configured mechanism to define the order of all writes.
-    sequence: Option<Sequence>,
+
+    /// The (optional) sequence for this entry including the timestamp when the producer ingested it into the write
+    /// buffer.
+    ///
+    /// At the time of writing, sequences will not be present when there is no configured mechanism to define the order
+    /// of all writes.
+    sequence_and_producer_ts: Option<(Sequence, DateTime<Utc>)>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1741,31 +1748,22 @@ impl Sequence {
 }
 
 impl SequencedEntry {
-    pub fn new_from_process_clock(
-        process_clock: ClockValue,
-        server_id: ServerId,
-        entry: Entry,
-    ) -> Result<Self, SequencedEntryError> {
-        Ok(Self {
-            entry,
-            sequence: Some(Sequence {
-                id: server_id.get_u32(),
-                number: process_clock.get_u64(),
-            }),
-        })
-    }
-
     pub fn new_from_sequence(
         sequence: Sequence,
+        producer_wallclock_timestamp: DateTime<Utc>,
         entry: Entry,
-    ) -> Result<Self, SequencedEntryError> {
-        let sequence = Some(sequence);
-        Ok(Self { entry, sequence })
+    ) -> Self {
+        Self {
+            entry,
+            sequence_and_producer_ts: Some((sequence, producer_wallclock_timestamp)),
+        }
     }
 
     pub fn new_unsequenced(entry: Entry) -> Self {
-        let sequence = None;
-        Self { entry, sequence }
+        Self {
+            entry,
+            sequence_and_producer_ts: None,
+        }
     }
 
     pub fn partition_writes(&self) -> Option<Vec<PartitionWrite<'_>>> {
@@ -1773,7 +1771,15 @@ impl SequencedEntry {
     }
 
     pub fn sequence(&self) -> Option<&Sequence> {
-        self.sequence.as_ref()
+        self.sequence_and_producer_ts
+            .as_ref()
+            .map(|(sequence, _ts)| sequence)
+    }
+
+    pub fn producer_wallclock_timestamp(&self) -> Option<DateTime<Utc>> {
+        self.sequence_and_producer_ts
+            .as_ref()
+            .map(|(_sequence, ts)| *ts)
     }
 
     pub fn entry(&self) -> &Entry {
@@ -2528,6 +2534,40 @@ mod tests {
             .unwrap();
         assert_eq!(min, ts);
         assert_eq!(max, Utc.timestamp(12, 3));
+    }
+
+    #[test]
+    fn timestamp_summary() {
+        let entries = lp_to_entries(
+            r#"
+        m foo=1 0
+        m foo=2 60000000000
+        m foo=3 120000000000
+        m foo=4 121000000000
+        m foo=5 3540000000000
+        m foo=6 3900000000000"#,
+            &partitioner(1),
+        );
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+
+        let writes = &entry.partition_writes().unwrap();
+        assert_eq!(writes.len(), 1);
+        let batches = &writes[0].table_batches();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+
+        assert_eq!(batch.row_count(), 6);
+        let summary = batch.timestamp_summary().unwrap();
+
+        let mut expected = [0_u32; 60];
+        expected[0] = 1;
+        expected[1] = 1;
+        expected[2] = 2;
+        expected[5] = 1;
+        expected[59] = 1;
+
+        assert_eq!(expected, summary.counts)
     }
 
     #[test]
