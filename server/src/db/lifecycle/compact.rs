@@ -87,14 +87,9 @@ pub(crate) fn compact_chunks(
         // Cannot move query_chunks as the sort key borrows the column names
         let (schema, plan) =
             ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone), key)?;
-        //ReorgPlanner::new().compact_plan(schema, query_chunks.iter().map(Arc::clone))?;
-        // let key_str = if let Some(sort_key) = schema.sort_key() {
-        //     format!("\"{}\"", sort_key) // for logging
-        // } else { format!("\"\"") };
 
         let physical_plan = ctx.prepare_plan(&plan)?;
         let stream = ctx.execute(physical_plan).await?;
-
         let rb_chunk = collect_rub(
             stream,
             &db,

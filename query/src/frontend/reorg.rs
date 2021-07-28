@@ -238,21 +238,6 @@ impl ReorgPlanner {
             LogicalPlanBuilder::scan(table_name, Arc::clone(&provider) as _, projection)
                 .context(BuildingPlan)?;
 
-        // // Set the sort_key of the schema to the compacted chunk's sort key
-        // let mut schema = provider.iox_schema();
-
-        // // Try to do this only if the sort key changes so we avoid unnecessary schema copies.
-        // trace!(input_schema=?schema, "Setting sort key on schema for compact plan");
-        // if schema
-        //     .sort_key()
-        //     .map_or(true, |existing_key| existing_key != sort_key)
-        // {
-        //     let mut schema_cloned = schema.as_ref().clone();
-        //     schema_cloned.set_sort_key(&sort_key);
-        //     schema = Arc::new(schema_cloned);
-        // }
-        // trace!(output_schema=?schema, "Setting sort key on schema for compact plan");
-
         Ok(ScanPlan {
             plan_builder,
             provider,
