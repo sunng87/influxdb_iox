@@ -166,12 +166,6 @@ pub enum ApplicationError {
     #[snafu(display("No handler for {:?} {}", method, path))]
     RouteNotFound { method: Method, path: String },
 
-    #[snafu(display("Internal error from database {}: {}", database, source))]
-    DatabaseError {
-        database: String,
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
     #[snafu(display("Error generating json response: {}", source))]
     JsonGenerationError { source: serde_json::Error },
 
@@ -257,7 +251,6 @@ impl ApplicationError {
             Self::ReadingBodyAsGzip { .. } => self.bad_request(),
             Self::ClientHangup { .. } => self.bad_request(),
             Self::RouteNotFound { .. } => self.not_found(),
-            Self::DatabaseError { .. } => self.internal_error(),
             Self::JsonGenerationError { .. } => self.internal_error(),
             Self::ErrorCreatingDatabase { .. } => self.bad_request(),
             Self::DatabaseNameError { .. } => self.bad_request(),
@@ -643,8 +636,10 @@ async fn query<M: ConnectionManager + Send + Sync + Debug + 'static>(
     let db_name = DatabaseName::new(&db_name_str).context(DatabaseNameError)?;
     debug!(uri = ?req.uri(), %q, ?format, %db_name, "running SQL query");
 
+    // TODO: Propagate error
     let db = server
         .db(&db_name)
+        .ok()
         .context(DatabaseNotFound { name: &db_name_str })?;
 
     let executor = db.executor();
@@ -746,7 +741,8 @@ async fn list_partitions<M: ConnectionManager + Send + Sync + Debug + 'static>(
         KeyValue::new("path", path),
     ];
 
-    let db = server.db(&db_name).context(BucketNotFound {
+    // TODO: Propagate error
+    let db = server.db(&db_name).ok().context(BucketNotFound {
         org: &info.org,
         bucket: &info.bucket,
     })?;
