@@ -90,6 +90,7 @@ use entry::{lines_to_sharded_entries, pb_to_entry, Entry, ShardedEntry};
 use generated_types::database_rules::encode_database_rules;
 use generated_types::influxdata::pbdata::v1 as pb;
 use influxdb_line_protocol::ParsedLine;
+use internal_types::persister::Persister;
 use lifecycle::LockableChunk;
 use metrics::{KeyValue, MetricObserverBuilder};
 use object_store::ObjectStoreApi;
@@ -575,7 +576,11 @@ where
         // load preserved catalog
         let (preserved_catalog, catalog, replay_plan) = create_preserved_catalog(
             rules.db_name(),
-            Arc::clone(self.application.object_store()),
+            Arc::new(Persister::new(
+                Arc::clone(self.application.object_store()),
+                config.server_id(),
+                rules.db_name(),
+            )),
             config.server_id(),
             Arc::clone(self.application.metric_registry()),
         )

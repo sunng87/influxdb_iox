@@ -27,7 +27,7 @@ use data_types::{
 use datafusion::catalog::{catalog::CatalogProvider, schema::SchemaProvider};
 use entry::{Entry, Sequence, SequencedEntry, TableBatch};
 use futures::{stream::BoxStream, StreamExt};
-use internal_types::schema::Schema;
+use internal_types::{persister::Persister, schema::Schema};
 use metrics::KeyValue;
 use mutable_buffer::chunk::{ChunkMetrics as MutableBufferChunkMetrics, MBChunk};
 use object_store::{path::parsed::DirsAndFileName, ObjectStore};
@@ -313,7 +313,7 @@ pub struct Db {
     server_id: ServerId, // this is also the Query Server ID
 
     /// Interface to use for persistence
-    store: Arc<ObjectStore>,
+    persister: Arc<Persister>,
 
     /// Executor for running queries
     exec: Arc<Executor>,

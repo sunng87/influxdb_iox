@@ -5,10 +5,11 @@ use data_types::{
 };
 use datafusion::physical_plan::SendableRecordBatchStream;
 use internal_types::{
+    persister::Persister,
     schema::{Schema, TIME_COLUMN_NAME},
     selection::Selection,
 };
-use object_store::{path::Path, ObjectStore};
+use object_store::path::Path;
 use query::predicate::Predicate;
 use snafu::{ResultExt, Snafu};
 use std::{collections::BTreeSet, mem, sync::Arc};
@@ -91,8 +92,8 @@ pub struct ParquetChunk {
     /// (extracted from TableSummary)
     timestamp_range: Option<TimestampRange>,
 
-    /// Object store of the above relative path to open and read the file
-    object_store: Arc<ObjectStore>,
+    /// Persister of the above relative path to open and read the file
+    persister: Arc<Persister>,
 
     /// Path in the object store. Format:
     ///  <writer id>/<database>/data/<partition key>/<chunk
@@ -112,7 +113,7 @@ impl ParquetChunk {
     /// Creates new chunk from given parquet metadata.
     pub fn new(
         file_location: Path,
-        store: Arc<ObjectStore>,
+        persister: Arc<Persister>,
         file_size_bytes: usize,
         parquet_metadata: Arc<IoxParquetMetaData>,
         table_name: Arc<str>,
@@ -137,7 +138,7 @@ impl ParquetChunk {
             Arc::new(table_summary),
             schema,
             file_location,
-            store,
+            persister,
             file_size_bytes,
             parquet_metadata,
             metrics,
@@ -152,7 +153,7 @@ impl ParquetChunk {
         table_summary: Arc<TableSummary>,
         schema: Arc<Schema>,
         file_location: Path,
-        store: Arc<ObjectStore>,
+        persister: Arc<Persister>,
         file_size_bytes: usize,
         parquet_metadata: Arc<IoxParquetMetaData>,
         metrics: ChunkMetrics,
@@ -164,7 +165,7 @@ impl ParquetChunk {
             table_summary,
             schema,
             timestamp_range,
-            object_store: store,
+            persister,
             object_store_path: file_location,
             file_size_bytes,
             parquet_metadata,
@@ -247,7 +248,7 @@ impl ParquetChunk {
             selection,
             Arc::clone(&self.schema.as_arrow()),
             self.object_store_path.clone(),
-            Arc::clone(&self.object_store),
+            Arc::clone(&self.persister),
         )
         .context(ReadParquet)
     }

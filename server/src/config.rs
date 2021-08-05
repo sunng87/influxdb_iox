@@ -7,6 +7,7 @@ use data_types::{
     database_rules::DatabaseRules, database_state::DatabaseStateCode, server_id::ServerId,
     DatabaseName,
 };
+use internal_types::persister::Persister;
 use metrics::MetricRegistry;
 use object_store::{path::ObjectStorePath, ObjectStore, ObjectStoreApi};
 use parking_lot::Mutex;
@@ -463,9 +464,13 @@ impl<'a> DatabaseHandle<'a> {
         self.state().db_name()
     }
 
-    /// Get object store.
-    pub fn object_store(&self) -> Arc<ObjectStore> {
-        self.config.object_store()
+    /// Get persister.
+    pub fn persister(&self) -> Arc<Persister> {
+        Arc::new(Persister::new(
+            self.config.object_store(),
+            self.server_id(),
+            self.db_name(),
+        ))
     }
 
     /// Get server ID.

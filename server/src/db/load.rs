@@ -1,9 +1,10 @@
 //! Functionality to load a [`Catalog`](crate::db::catalog::Catalog) and other information from a
 //! [`PreservedCatalog`](parquet_file::catalog::PreservedCatalog).
 
-use std::sync::Arc;
-
+use super::catalog::Catalog;
+use crate::db::catalog::{chunk::ChunkStage, table::TableSchemaUpsertHandle};
 use data_types::server_id::ServerId;
+use internal_types::persister::Persister;
 use metrics::{KeyValue, MetricRegistry};
 use object_store::{path::parsed::DirsAndFileName, ObjectStore};
 use observability_deps::tracing::{error, info};
@@ -13,10 +14,7 @@ use parquet_file::{
 };
 use persistence_windows::checkpoint::{ReplayPlan, ReplayPlanner};
 use snafu::{ResultExt, Snafu};
-
-use crate::db::catalog::{chunk::ChunkStage, table::TableSchemaUpsertHandle};
-
-use super::catalog::Catalog;
+use std::sync::Arc;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -50,16 +48,14 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// <https://github.com/influxdata/influxdb_iox/issues/1522>
 pub async fn load_or_create_preserved_catalog(
     db_name: &str,
-    object_store: Arc<ObjectStore>,
+    persister: Arc<Persister>,
     server_id: ServerId,
     metrics_registry: Arc<MetricRegistry>,
     wipe_on_error: bool,
 ) -> Result<(PreservedCatalog, Catalog, ReplayPlan)> {
     // first try to load existing catalogs
     match PreservedCatalog::load(
-        Arc::clone(&object_store),
-        server_id,
-        db_name.to_string(),
+        Arc::clone(&persister),
         LoaderEmptyInput::new(db_name, server_id, Arc::clone(&metrics_registry)),
     )
     .await
@@ -80,7 +76,7 @@ pub async fn load_or_create_preserved_catalog(
 
             create_preserved_catalog(
                 db_name,
-                Arc::clone(&object_store),
+                Arc::clone(&persister),
                 server_id,
                 Arc::clone(&metrics_registry),
             )
@@ -92,13 +88,13 @@ pub async fn load_or_create_preserved_catalog(
                 // broken => wipe for now (at least during early iterations)
                 error!("cannot load catalog, so wipe it: {}", e);
 
-                PreservedCatalog::wipe(&object_store, server_id, db_name)
+                PreservedCatalog::wipe(&persister, server_id, db_name)
                     .await
                     .context(CannotWipeCatalog)?;
 
                 create_preserved_catalog(
                     db_name,
-                    Arc::clone(&object_store),
+                    Arc::clone(&persister),
                     server_id,
                     Arc::clone(&metrics_registry),
                 )
@@ -115,14 +111,12 @@ pub async fn load_or_create_preserved_catalog(
 /// This will fail if a preserved catalog already exists.
 pub async fn create_preserved_catalog(
     db_name: &str,
-    object_store: Arc<ObjectStore>,
+    persister: Arc<Persister>,
     server_id: ServerId,
     metrics_registry: Arc<MetricRegistry>,
 ) -> Result<(PreservedCatalog, Catalog, ReplayPlan)> {
     let (preserved_catalog, loader) = PreservedCatalog::new_empty(
-        Arc::clone(&object_store),
-        server_id,
-        db_name.to_string(),
+        Arc::clone(&persister),
         LoaderEmptyInput::new(db_name, server_id, Arc::clone(&metrics_registry)),
     )
     .await

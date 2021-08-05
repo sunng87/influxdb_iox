@@ -7,6 +7,7 @@ use data_types::{
 };
 use futures::TryStreamExt;
 use generated_types::database_rules::decode_database_rules;
+use internal_types::persister::Persister;
 use object_store::{
     path::{parsed::DirsAndFileName, ObjectStorePath, Path},
     ObjectStore, ObjectStoreApi,
@@ -176,9 +177,9 @@ async fn initialize_database(
     }
 }
 
-async fn load_database_rules(store: Arc<ObjectStore>, path: &Path) -> Result<DatabaseRules> {
+async fn load_database_rules(persister: Arc<Persister>, path: &Path) -> Result<DatabaseRules> {
     let serialized_rules = loop {
-        match get_database_config_bytes(path, &store).await {
+        match get_database_config_bytes(path, &persister).await {
             Ok(data) => break data,
             Err(e) => {
                 if let Error::NoDatabaseConfigError { location } = &e {
@@ -290,7 +291,7 @@ async fn try_advance_database_init_process(
         DatabaseStateCode::Known => {
             // known => load DB rules
             let path = object_store_path_for_database_config(root, &handle.db_name());
-            let rules = load_database_rules(handle.object_store(), &path).await?;
+            let rules = load_database_rules(handle.persister(), &path).await?;
             handle
                 .advance_rules_loaded(rules)
                 .map_err(Box::new)
@@ -303,7 +304,7 @@ async fn try_advance_database_init_process(
             // rules already loaded => continue with loading preserved catalog
             let (preserved_catalog, catalog, replay_plan) = load_or_create_preserved_catalog(
                 &handle.db_name(),
-                handle.object_store(),
+                handle.persister(),
                 handle.server_id(),
                 handle.metrics_registry(),
                 wipe_on_error,
@@ -385,9 +386,9 @@ async fn get_store_bytes(
 // otherwise it returns none.
 async fn get_database_config_bytes(
     location: &object_store::path::Path,
-    store: &ObjectStore,
+    persister: &Persister,
 ) -> Result<bytes::BytesMut> {
-    let list_result = store
+    let list_result = persister
         .list_with_delimiter(location)
         .await
         .context(StoreError)?;
@@ -397,7 +398,7 @@ async fn get_database_config_bytes(
         }
         .fail();
     }
-    get_store_bytes(location, store).await
+    get_store_bytes(location, persister).await
 }
 
 /// Helper to extract the DB name from the rules file path.

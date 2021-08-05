@@ -1765,9 +1765,13 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "arrow_util",
+ "bytes",
+ "data_types",
+ "futures",
  "hashbrown",
  "indexmap",
  "itertools 0.10.1",
+ "object_store",
  "observability_deps",
  "snafu",
 ]
