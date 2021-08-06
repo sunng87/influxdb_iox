@@ -1,6 +1,6 @@
 //! This module contains implementations for the storage gRPC service
-//! implemented in terms of the [`query::Database`] and
-//! [`query::DatabaseStore`]
+//! implemented in terms of the [`QueryDatabase`](query::QueryDatabase) and
+//! [`DatabaseStore`]
 
 use crate::influxdb_ioxd::{
     planner::Planner,
