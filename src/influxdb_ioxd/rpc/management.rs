@@ -397,24 +397,28 @@ where
     ) -> Result<Response<GetServerStatusResponse>, Status> {
         let initialized = self.server.initialized();
 
+        // Purposefully suppress error from server::Databases as don't want
+        // to return an error if the server is not initialized
         let mut database_statuses: Vec<_> = self
             .server
             .databases()
-            .into_iter()
-            .flat_map(|databases| {
-                databases.into_iter().map(|database| {
-                    let state: database_status::DatabaseState = database.state_code().into();
+            .map(|databases| {
+                databases
+                    .into_iter()
+                    .map(|database| {
+                        let state: database_status::DatabaseState = database.state_code().into();
 
-                    DatabaseStatus {
-                        db_name: database.config().name.to_string(),
-                        error: database.init_error().map(|e| ProtobufError {
-                            message: e.to_string(),
-                        }),
-                        state: state.into(),
-                    }
-                })
+                        DatabaseStatus {
+                            db_name: database.config().name.to_string(),
+                            error: database.init_error().map(|e| ProtobufError {
+                                message: e.to_string(),
+                            }),
+                            state: state.into(),
+                        }
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         // Sort output by database name
         database_statuses.sort_unstable_by(|a, b| a.db_name.cmp(&b.db_name));

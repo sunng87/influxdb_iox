@@ -29,8 +29,15 @@ const INIT_BACKOFF: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("a state transition is already in progress for database {}", db_name))]
-    TransitionInProgress { db_name: String },
+    #[snafu(display(
+        "a state transition is already in progress for database ({}) in state {}",
+        db_name,
+        state
+    ))]
+    TransitionInProgress {
+        db_name: String,
+        state: DatabaseStateCode,
+    },
 
     #[snafu(display(
         "database ({}) in invalid state ({:?}) for transition ({})",
@@ -186,6 +193,7 @@ impl Database {
 
             let handle = state.try_freeze().ok_or(Error::TransitionInProgress {
                 db_name: db_name.to_string(),
+                state: state.state_code(),
             })?;
 
             (current_state, handle)
@@ -236,7 +244,7 @@ struct DatabaseShared {
 
 /// The background loop for `Database` - there should only ever be one
 async fn background_loop(shared: Arc<DatabaseShared>) {
-    info!(db_name=%shared.config.name, "started Database background loop");
+    info!(db_name=%shared.config.name, "started database background loop");
 
     initialize_database(shared.as_ref()).await;
 
@@ -252,7 +260,7 @@ async fn background_loop(shared: Arc<DatabaseShared>) {
 
         info!(db_name=%shared.config.name, "database finished initialization - starting Db loop");
 
-        // TODO: Pull this out of `Db`
+        // TODO: Pull background_worker out of `Db`
         db.background_worker(shared.shutdown.clone()).await
     }
 
@@ -265,6 +273,8 @@ async fn background_loop(shared: Arc<DatabaseShared>) {
 /// this is achieved or the shutdown signal is triggered
 async fn initialize_database(shared: &DatabaseShared) {
     let db_name = &shared.config.name;
+    info!(%db_name, "database initialization started");
+
     while !shared.shutdown.is_cancelled() {
         // Acquire locks and determine if work to be done
         let maybe_transaction = {
@@ -281,7 +291,7 @@ async fn initialize_database(shared: &DatabaseShared) {
                         Some(handle) => Some((DatabaseState::clone(&state), handle)),
                         None => {
                             // Backoff if there is already an in-progress initialization action (e.g. recovery)
-                            info!(%db_name, "init transaction already in progress");
+                            info!(%db_name, %state, "init transaction already in progress");
                             None
                         }
                     }
@@ -290,7 +300,7 @@ async fn initialize_database(shared: &DatabaseShared) {
                 DatabaseState::RulesLoadError(_, e)
                 | DatabaseState::CatalogLoadError(_, e)
                 | DatabaseState::ReplayError(_, e) => {
-                    error!(%db_name, error=%e, "database in error state - operator intervention required");
+                    error!(%db_name, %e, %state, "database in error state - operator intervention required");
                     None
                 }
             }
@@ -362,6 +372,11 @@ pub enum InitError {
     Replay { source: crate::db::Error },
 }
 
+/// The Database startup state machine
+///
+/// A Database starts in DatabaseState::Known and advances through the
+/// states in sequential order until it reaches Initialized or an error
+/// is encountered.
 #[derive(Debug, Clone)]
 enum DatabaseState {
     Known(DatabaseStateKnown),
@@ -375,17 +390,22 @@ enum DatabaseState {
     ReplayError(DatabaseStateCatalogLoaded, Arc<InitError>),
 }
 
+impl std::fmt::Display for DatabaseState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.state_code().fmt(f)
+    }
+}
+
 impl DatabaseState {
     fn state_code(&self) -> DatabaseStateCode {
-        // TODO: Update DatabaseStateCode
         match self {
             DatabaseState::Known(_) => DatabaseStateCode::Known,
             DatabaseState::RulesLoaded(_) => DatabaseStateCode::RulesLoaded,
-            DatabaseState::CatalogLoaded(_) => DatabaseStateCode::Replay,
+            DatabaseState::CatalogLoaded(_) => DatabaseStateCode::CatalogLoaded,
             DatabaseState::Initialized(_) => DatabaseStateCode::Initialized,
             DatabaseState::RulesLoadError(_, _) => DatabaseStateCode::Known,
             DatabaseState::CatalogLoadError(_, _) => DatabaseStateCode::RulesLoaded,
-            DatabaseState::ReplayError(_, _) => DatabaseStateCode::Replay,
+            DatabaseState::ReplayError(_, _) => DatabaseStateCode::CatalogLoaded,
         }
     }
 

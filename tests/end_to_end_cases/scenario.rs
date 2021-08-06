@@ -13,6 +13,7 @@ use rand::{
     distributions::{Alphanumeric, Standard},
     thread_rng, Rng,
 };
+use test_helpers::assert_contains;
 
 use data_types::{names::org_and_bucket_to_database, DatabaseName};
 use database_rules::RoutingRules;
@@ -612,7 +613,10 @@ pub async fn fixture_broken_catalog(db_name: &str) -> ServerFixture {
     assert_eq!(status.database_statuses.len(), 1);
 
     let load_error = &status.database_statuses[0].error.as_ref().unwrap().message;
-    assert!(load_error.starts_with("error loading catalog: Cannot load preserved catalog"));
+    assert_contains!(
+        load_error,
+        "error loading catalog: Cannot load preserved catalog"
+    );
 
     fixture
 }

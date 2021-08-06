@@ -803,7 +803,10 @@ async fn test_wipe_preserved_catalog() {
     assert_eq!(status.database_statuses.len(), 1);
 
     let load_error = &status.database_statuses[0].error.as_ref().unwrap().message;
-    assert!(load_error.starts_with("error loading catalog: Cannot load preserved catalog"));
+    assert_contains!(
+        load_error,
+        "error loading catalog: Cannot load preserved catalog"
+    );
 
     //
     // Recover by wiping preserved catalog

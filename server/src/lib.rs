@@ -357,16 +357,13 @@ pub enum InitError {
 
 /// The stage of the server in the startup process
 ///
-/// The progression is linear Startup -> InitReady -> Initializing -> Initialized
-/// with the sole exception that on failure Initializing -> InitReady
+/// The progression is linear Startup -> InitReady -> Initialized
 ///
-/// Errors encountered on server init will be retried, however, errors encountered
-/// during database init will require operator intervention
+/// If an error is encountered trying to transition InitReady -> Initialized it enters
+/// state InitError and the background worker will continue to try to advance to Initialized
 ///
-/// These errors are exposed via `Server::error_generic` and `Server::error_database` respectively
+/// Any error encountered is exposed by Server::init_error()
 ///
-/// They do not impact the state machine's progression, but instead are exposed to the
-/// gRPC management API to allow an operator to assess the state of the system
 #[derive(Debug)]
 enum ServerState {
     /// Server has started but doesn't have a server id yet
@@ -549,6 +546,8 @@ where
     }
 
     /// Tells the server the set of rules for a database.
+    ///
+    /// Waits until the database has initialized or failed to do so
     pub async fn create_database(&self, rules: DatabaseRules) -> Result<()> {
         let db_name = rules.name.clone();
         let object_store = self.shared.application.object_store().as_ref();
