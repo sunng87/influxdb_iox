@@ -790,13 +790,11 @@ async fn test_wipe_preserved_catalog() {
     use influxdb_iox_client::management::generated_types::operation_metadata::Job;
     let db_name = rand_name();
 
-    let fixture = fixture_broken_catalog(&db_name).await;
-
     //
     // Try to load broken catalog and error
     //
 
-    let fixture = fixture.restart_server().await;
+    let fixture = fixture_broken_catalog(&db_name).await;
 
     let mut management_client = fixture.management_client();
     let mut operations_client = fixture.operations_client();
