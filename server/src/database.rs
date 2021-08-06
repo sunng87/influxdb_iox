@@ -343,6 +343,13 @@ pub enum InitError {
         source: generated_types::database_rules::DecodeError,
     },
 
+    #[snafu(display(
+        "Database names in deserialized rules ({}) does not match expected value ({})",
+        actual,
+        expected
+    ))]
+    RulesDatabaseNameMismatch { actual: String, expected: String },
+
     #[snafu(display("error loading catalog: {}", source))]
     CatalogLoad { source: crate::db::load::Error },
 
@@ -434,6 +441,13 @@ impl DatabaseStateKnown {
 
         let rules =
             generated_types::database_rules::decode_database_rules(bytes).context(RulesDecode)?;
+
+        if rules.name != shared.config.name {
+            return Err(InitError::RulesDatabaseNameMismatch {
+                actual: rules.name.to_string(),
+                expected: shared.config.name.to_string(),
+            });
+        }
 
         Ok(DatabaseStateRulesLoaded {
             rules: Arc::new(rules),

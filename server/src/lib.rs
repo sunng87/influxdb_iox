@@ -569,7 +569,7 @@ where
         };
 
         // Prevent concurrent database creation
-        let _guard = create_database_lock.lock().await;
+        let guard = create_database_lock.lock().await;
 
         let store_prefix = database_store_prefix(object_store, server_id, &db_name);
         persist_database_rules(object_store, &store_prefix, rules).await?;
@@ -586,6 +586,10 @@ where
 
         let database = {
             let mut state = self.shared.state.write();
+
+            // Have exclusive lock on state - can drop database creation lock
+            std::mem::drop(guard);
+
             let state = state.get_mut().expect("no transaction in progress");
             let database = match state {
                 ServerState::Initialized(initialized) => {
