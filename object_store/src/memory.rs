@@ -80,7 +80,7 @@ impl ObjectStoreApi for InMemory {
             .get(location)
             .cloned()
             .context(NoDataInMemory {
-                location: format!("{}", location),
+                location: location.to_string(),
             })?;
 
         Ok(futures::stream::once(async move { Ok(data) }).boxed())

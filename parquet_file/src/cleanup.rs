@@ -152,6 +152,7 @@ mod tests {
     use std::{collections::HashSet, sync::Arc};
 
     use bytes::Bytes;
+    use data_types::server_id::ServerId;
     use object_store::path::{ObjectStorePath, Path};
     use tokio::sync::RwLock;
 
@@ -203,7 +204,7 @@ mod tests {
             };
 
             transaction.add_parquet(&info).unwrap();
-            paths_keep.push(info.path.display());
+            paths_keep.push(info.path.to_string());
 
             // another ordinary tracked parquet file that was added and removed => keep (for time travel)
             let (path, metadata) = make_metadata(&iox_object_store, "foo", chunk_addr(2)).await;
@@ -216,18 +217,18 @@ mod tests {
             };
             transaction.add_parquet(&info).unwrap();
             transaction.remove_parquet(&info.path);
-            paths_keep.push(info.path.display());
+            paths_keep.push(info.path.to_string());
 
             // not a parquet file => keep
             let mut path = info.path;
             path.file_name = Some("foo.txt".into());
             let path = iox_object_store.path_from_dirs_and_filename(path);
             create_empty_file(&iox_object_store, &path).await;
-            paths_keep.push(path.display());
+            paths_keep.push(path.to_string());
 
             // an untracked parquet file => delete
-            let (path, _md) = make_metadata(&iox_object_store, "foo", chunk_addr(3)).await;
-            paths_delete.push(path.display());
+            let (path, _md) = make_metadata(&object_store, "foo", chunk_addr(3)).await;
+            paths_delete.push(path.to_string());
 
             transaction.commit().await.unwrap();
         }
@@ -288,7 +289,7 @@ mod tests {
 
                     drop(guard);
 
-                    info.path.display()
+                    info.path.to_string()
                 },
                 async {
                     let guard = lock.write().await;
@@ -319,7 +320,7 @@ mod tests {
         let mut to_remove: HashSet<String> = Default::default();
         for chunk_id in 0..3 {
             let (path, _md) = make_metadata(&iox_object_store, "foo", chunk_addr(chunk_id)).await;
-            to_remove.insert(path.display());
+            to_remove.insert(path.to_string());
         }
 
         // run clean-up
@@ -366,7 +367,7 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|p| p.display())
+            .map(|p| p.to_string())
             .collect()
     }
 }
