@@ -5,7 +5,7 @@ use crate::catalog::{CatalogParquetInfo, CatalogState, PreservedCatalog};
 use futures::TryStreamExt;
 use iox_object_store::IoxObjectStore;
 use object_store::{
-    path::{parsed::DirsAndFileName, ObjectStorePath, Path},
+    path::{parsed::DirsAndFileName, Path},
     ObjectStore, ObjectStoreApi,
 };
 use observability_deps::tracing::info;
@@ -109,7 +109,7 @@ pub async fn delete_files(catalog: &PreservedCatalog, files: &[Path]) -> Result<
     let store = catalog.iox_object_store();
 
     for path in files {
-        info!(path = %path.display(), "Delete file");
+        info!(path = %path.to_string(), "Delete file");
         store.delete(path).await.context(WriteError)?;
     }
 
