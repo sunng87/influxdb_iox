@@ -196,6 +196,7 @@ mod tests {
             // an ordinary tracked parquet file => keep
             let (path, metadata) = make_metadata(&iox_object_store, "foo", chunk_addr(1)).await;
             let metadata = Arc::new(metadata);
+            paths_keep.push(path.to_string());
             let path = path.into();
             let info = CatalogParquetInfo {
                 path,
@@ -204,7 +205,6 @@ mod tests {
             };
 
             transaction.add_parquet(&info).unwrap();
-            paths_keep.push(info.path.to_string());
 
             // another ordinary tracked parquet file that was added and removed => keep (for time travel)
             let (path, metadata) = make_metadata(&iox_object_store, "foo", chunk_addr(2)).await;
@@ -217,7 +217,10 @@ mod tests {
             };
             transaction.add_parquet(&info).unwrap();
             transaction.remove_parquet(&info.path);
-            paths_keep.push(info.path.to_string());
+            let path_string = object_store
+                .path_from_dirs_and_filename(info.path.clone())
+                .to_string();
+            paths_keep.push(path_string);
 
             // not a parquet file => keep
             let mut path = info.path;
@@ -289,7 +292,9 @@ mod tests {
 
                     drop(guard);
 
-                    info.path.to_string()
+                    object_store
+                        .path_from_dirs_and_filename(info.path)
+                        .to_string()
                 },
                 async {
                     let guard = lock.write().await;
@@ -303,7 +308,7 @@ mod tests {
             );
 
             let all_files = list_all_files(&iox_object_store).await;
-            assert!(all_files.contains(&path));
+            assert!(dbg!(all_files).contains(dbg!(&path)));
         }
     }
 
