@@ -109,7 +109,7 @@ pub async fn delete_files(catalog: &PreservedCatalog, files: &[Path]) -> Result<
     let store = catalog.iox_object_store();
 
     for path in files {
-        info!(path = %path.to_string(), "Delete file");
+        info!(%path, "Delete file");
         store.delete(path).await.context(WriteError)?;
     }
 

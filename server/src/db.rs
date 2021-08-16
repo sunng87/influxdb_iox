@@ -3909,7 +3909,9 @@ mod tests {
             let mut tmp: Vec<String> = catalog
                 .parquet_files
                 .keys()
-                .map(|p| p.to_string())
+                .map(|p| {
+                    object_store.path_from_dirs_and_filename(p.clone()).to_string()
+                })
                 .collect();
             tmp.sort();
             tmp
