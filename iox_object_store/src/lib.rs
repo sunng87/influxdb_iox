@@ -195,6 +195,9 @@ mod tests {
         let server_id = make_server_id();
         let database_name = DatabaseName::new("clouds").unwrap();
         let iox_object_store = IoxObjectStore::new(make_object_store(), server_id, &database_name);
-        assert_eq!(iox_object_store.data_path().to_string(), "mem:1/clouds/data/");
+        assert_eq!(
+            iox_object_store.data_path().to_string(),
+            "mem:1/clouds/data/"
+        );
     }
 }

@@ -3910,7 +3910,9 @@ mod tests {
                 .parquet_files
                 .keys()
                 .map(|p| {
-                    object_store.path_from_dirs_and_filename(p.clone()).to_string()
+                    object_store
+                        .path_from_dirs_and_filename(p.clone())
+                        .to_string()
                 })
                 .collect();
             tmp.sort();
