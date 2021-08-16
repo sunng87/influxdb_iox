@@ -152,8 +152,7 @@ mod tests {
     use std::{collections::HashSet, sync::Arc};
 
     use bytes::Bytes;
-    use data_types::server_id::ServerId;
-    use object_store::path::{ObjectStorePath, Path};
+    use object_store::path::Path;
     use tokio::sync::RwLock;
 
     use super::*;
@@ -217,7 +216,7 @@ mod tests {
             };
             transaction.add_parquet(&info).unwrap();
             transaction.remove_parquet(&info.path);
-            let path_string = object_store
+            let path_string = iox_object_store
                 .path_from_dirs_and_filename(info.path.clone())
                 .to_string();
             paths_keep.push(path_string);
@@ -230,7 +229,7 @@ mod tests {
             paths_keep.push(path.to_string());
 
             // an untracked parquet file => delete
-            let (path, _md) = make_metadata(&object_store, "foo", chunk_addr(3)).await;
+            let (path, _md) = make_metadata(&iox_object_store, "foo", chunk_addr(3)).await;
             paths_delete.push(path.to_string());
 
             transaction.commit().await.unwrap();
@@ -292,7 +291,7 @@ mod tests {
 
                     drop(guard);
 
-                    object_store
+                    iox_object_store
                         .path_from_dirs_and_filename(info.path)
                         .to_string()
                 },
